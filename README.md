@@ -1,0 +1,1554 @@
+# Strava Training Analysis
+
+A small Python toolkit for analysing historical Strava activity exports, with a particular focus on:
+
+- heart-rate evidence across multiple durations;
+- per-ride HRmax evidence;
+- cautious LT2 estimation;
+- long-duration sustained heart-rate observations;
+- climbing performance using VAM;
+- annual cycling volume, distance and elevation;
+- bike/gear context from Strava's `activities.csv`;
+- historical comparison across many years.
+
+The current versions are:
+
+- `scan_strava_v12.py` — batch scanner and yearly summary;
+- `activity_file_processor_v10.py` — per-file wrapper used by the scanner;
+- `analyze_training_v10.py` — underlying activity analysis engine.
+
+The scanner is **training-analysis only**. The older standalone/legacy HR-only scan mode has been removed.
+
+---
+
+## 1. Requirements
+
+### Python
+
+Python 3.10+ is recommended.
+
+The GPX and TCX readers use only the Python standard library.
+
+FIT support requires `fitparse`:
+
+```bash
+python3 -m pip install fitparse
+```
+
+### Files
+
+Put these three Python files in the same directory:
+
+```text
+scan_strava_v12.py
+activity_file_processor_v10.py
+analyze_training_v10.py
+```
+
+The import names are versioned, so do not rename only one of the three files unless you also update the imports.
+
+---
+
+## 2. Supported activity files
+
+The scanner understands:
+
+```text
+.gpx
+.gpx.gz
+.tcx
+.tcx.gz
+.fit
+.fit.gz
+```
+
+Files are scanned from the **single directory supplied on the command line**. The scanner is not recursive.
+
+Example:
+
+```text
+Strava/
+├── activities.csv
+└── activities/
+    ├── 12345678901.fit.gz
+    ├── 12345678902.gpx
+    ├── 12345678903.tcx.gz
+    └── ...
+```
+
+---
+
+## 3. Strava `activities.csv`
+
+The scanner can run without `activities.csv`, but it is strongly recommended.
+
+When available, `activities.csv` is used for:
+
+- fast preselection by year and sport;
+- Strava activity ID;
+- activity name;
+- bike/gear name;
+- bike weight;
+- bike ID;
+- athlete weight, if present;
+- annual activity count;
+- annual moving time;
+- annual distance;
+- annual elevation gain;
+- counts of long rides.
+
+It also allows annual volume to include rides where no usable HR trace exists.
+
+### Automatic lookup
+
+If the activity directory is:
+
+```text
+/path/to/Strava/activities
+```
+
+the scanner automatically looks for:
+
+```text
+/path/to/Strava/activities.csv
+```
+
+You can also specify it explicitly:
+
+```bash
+--activities-csv /path/to/Strava/activities.csv
+```
+
+### File matching
+
+The Strava CSV normally contains filenames such as:
+
+```text
+activities/12345678901.fit.gz
+```
+
+The scanner joins these to the exported files by basename:
+
+```text
+12345678901.fit.gz
+```
+
+### Meaning of `CSV rows missing file`
+
+For example:
+
+```text
+CSV rows matched:      174
+Matching files found:  168
+CSV rows missing file: 6
+```
+
+means that 174 metadata rows matched the year/sport filter, but six referenced activity files were not present in the supplied activity directory.
+
+---
+
+## 4. Basic usage
+
+The main command is:
+
+```bash
+python3 scan_strava_v12.py DIRECTORY --hrmax HRMAX
+```
+
+`--hrmax` is mandatory.
+
+Example:
+
+```bash
+python3 scan_strava_v12.py /home/user/Strava/activities --hrmax 184
+```
+
+A typical yearly cycling scan is:
+
+```bash
+python3 scan_strava_v12.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --output cycling_2025.csv
+```
+
+With an explicit metadata file:
+
+```bash
+python3 scan_strava_v12.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --output cycling_2025.csv --activities-csv /home/user/Strava/activities.csv
+```
+
+---
+
+## 5. Command-line options
+
+### Positional argument
+
+#### `directory`
+
+Directory containing GPX, TCX or FIT activity files.
+
+Example:
+
+```bash
+python3 scan_strava_v12.py ../../Documents/Strava/activities ...
+```
+
+---
+
+### `--hrmax`
+
+Required yearly HRmax reference.
+
+Example:
+
+```bash
+--hrmax 192
+```
+
+This is the HRmax value used by the analysis rules for that run.
+
+The program also reports **per-ride HRmax candidates**, so a useful workflow is:
+
+1. make a reasonable yearly HRmax estimate;
+2. run the analysis;
+3. inspect credible HRmax candidates;
+4. revise the yearly HRmax if appropriate;
+5. rerun the year.
+
+The software does **not** silently replace the supplied HRmax.
+
+---
+
+### `--year`
+
+Restrict analysis to one calendar year.
+
+Example:
+
+```bash
+--year 2015
+```
+
+When `activities.csv` is available, year filtering is performed before opening the activity files, which greatly speeds up large Strava archives.
+
+Year extraction is locale-independent, so English Strava dates such as:
+
+```text
+Dec 28, 2025, 2:34:18 PM
+```
+
+also work on systems using a French locale.
+
+---
+
+### `--month`
+
+Optional season-start month (1–12). It requires `--year`. For example `--year 2025 --month 5` analyses May 2025 through April 2026.
+
+---
+
+### `--add-missing-metadata`
+
+Append successfully analysed files missing from `activities.csv`. A one-time `activities.csv.bak` backup is created before the first append.
+
+---
+
+### `--sport`
+
+Restrict analysis to one normalized sport.
+
+Example:
+
+```bash
+--sport cycling
+```
+
+Common normalized values include:
+
+```text
+cycling
+running
+walking
+skiing
+roller skiing
+```
+
+Several Strava activity labels are normalized automatically. For example, `Ride`, `VirtualRide`, `MountainBikeRide` and `GravelRide` are treated as `cycling`.
+
+---
+
+### `--lt2`
+
+Optional known LT2 heart rate.
+
+Example:
+
+```bash
+--lt2 162
+```
+
+Usually omit this when using the archive to estimate historical LT2.
+
+If supplied, it can help the effort-classification logic.
+
+---
+
+### `--min-hr`
+
+Minimum accepted HR sample.
+
+Default:
+
+```text
+50 bpm
+```
+
+Example:
+
+```bash
+--min-hr 45
+```
+
+---
+
+### `--max-hr`
+
+Maximum accepted HR sample.
+
+Default:
+
+```text
+220 bpm
+```
+
+Example:
+
+```bash
+--max-hr 210
+```
+
+This is a hard sample-validity limit, not the physiological HRmax estimate.
+
+The supplied `--hrmax` must lie between `--min-hr` and `--max-hr`.
+
+---
+
+### `--activities-csv`
+
+Explicit path to Strava's `activities.csv`.
+
+Example:
+
+```bash
+--activities-csv ../Strava/activities.csv
+```
+
+If omitted, the scanner looks in the parent directory of the activity folder.
+
+---
+
+### `--output`
+
+Output CSV path.
+
+Example:
+
+```bash
+--output cycling_2015.csv
+```
+
+Defaults:
+
+```text
+training_<year>.csv
+```
+
+for a calendar-year scan, or:
+
+```text
+training_<year>-<month>.csv
+```
+
+for a rolling 12-month season, otherwise:
+
+```text
+strava_training_summary.csv
+```
+
+---
+
+## 5A. Rolling 12-month seasons with `--month`
+
+By default, `--year 2025` means the calendar year 1 January through 31 December 2025.
+
+If `--month` is supplied, `--year` becomes the **season start year** and the scanner analyses exactly 12 months beginning on the first day of that month.
+
+For example:
+
+```bash
+--year 2025 --month 5
+```
+
+means:
+
+```text
+1 May 2025 <= activity < 1 May 2026
+```
+
+or, in ordinary terms, **May 2025 through April 2026**.
+
+This is particularly useful for sports such as cross-country skiing whose training year may begin after the winter season.
+
+Example:
+
+```bash
+python3 scan_strava_v13.py /home/user/Strava/activities --hrmax 184 --year 2025 --month 5 --sport skiing --output skiing_2025-26.csv
+```
+
+If `--output` is omitted, a season beginning in May 2025 defaults to:
+
+```text
+training_2025-05.csv
+```
+
+`--month` requires `--year`.
+
+---
+
+## 5B. Updating `activities.csv` as new files arrive
+
+A Strava export is normally static, but the activity directory can also be used as a growing local archive during a season.
+
+If new GPX, TCX or FIT files are copied into the directory, they may not yet have rows in the original Strava `activities.csv`.
+
+Use:
+
+```bash
+--add-missing-metadata
+```
+
+to append successfully analysed missing files to `activities.csv`.
+
+Example:
+
+```bash
+python3 scan_strava_v13.py /home/user/Strava/activities --hrmax 184 --year 2026 --sport cycling --activities-csv /home/user/Strava/activities.csv --add-missing-metadata --output cycling_2026.csv
+```
+
+When this option is enabled, the scanner does **not** rely solely on `activities.csv` for preselection. It scans the activity directory so newly added files can be discovered.
+
+Before the first append, the scanner creates a one-time backup:
+
+```text
+activities.csv.bak
+```
+
+Existing rows are never replaced.
+
+For a newly discovered activity, only metadata that can be reconstructed locally is written:
+
+```text
+Filename
+Activity Date
+Activity Type
+Elapsed Time
+Moving Time
+Distance
+Elevation Gain
+```
+
+Fields that cannot be reconstructed reliably remain blank, including Strava activity ID, gear, bike weight and calories.
+
+For locally reconstructed rows, `Moving Time` and `Elapsed Time` are initially set to the analysed activity duration. The scanner deliberately does not invent Strava-specific pause semantics that are not available from the local source file.
+
+After appending rows, the scanner reloads `activities.csv`, so the current run's annual/season volume summary immediately includes the new activities.
+
+
+---
+
+## 6. Full yearly example
+
+```bash
+python3 scan_strava_v12.py ../../Documents/Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv ../../Documents/Strava/activities.csv
+```
+
+Typical output begins with:
+
+```text
+Strava metadata:       ../../Documents/Strava/activities.csv
+Metadata rows loaded:  3746
+CSV rows matched:      93
+Matching files found:  93
+```
+
+The scanner then processes each matching activity and writes one CSV row per successfully analysed activity.
+
+At the end it prints the yearly summary.
+
+---
+
+## 7. Exit status
+
+The scanner returns:
+
+```text
+0
+```
+
+when the run completes with no activity-file analysis errors.
+
+It returns:
+
+```text
+1
+```
+
+if one or more activity files caused analysis/parsing errors.
+
+It returns:
+
+```text
+2
+```
+
+for command/configuration errors such as an invalid directory, invalid HR limits, or a missing/bad `activities.csv`.
+
+Important: a return code of `1` does **not** mean the whole scan failed. The output CSV and successfully analysed activities are still written.
+
+---
+
+# Analysis metrics
+
+## 8. Activity date and duration
+
+Dates are written in human-readable form:
+
+```text
+17 Jul 2015 14:32
+```
+
+Duration is written as:
+
+```text
+h:mm:ss
+```
+
+for example:
+
+```text
+4:07:35
+```
+
+The calculations internally still use seconds.
+
+---
+
+## 9. Basic heart-rate fields
+
+### `average_hr`
+
+Average HR after the analysis artefact exclusion logic.
+
+### `raw_max_hr`
+
+Highest accepted raw HR sample before artefact exclusion.
+
+This should **not** automatically be interpreted as physiological HRmax.
+
+### `analysed_max_hr`
+
+Highest HR remaining after the analyser excludes recognised artefact intervals.
+
+---
+
+# HRmax evidence
+
+## 10. Rolling HRmax observations
+
+Each ride reports:
+
+```text
+hrmax_10s
+hrmax_30s
+hrmax_60s
+```
+
+These are the best rolling HR averages over 10, 30 and 60 seconds.
+
+They are more useful than an isolated one-second maximum because they show whether a high HR was sustained.
+
+---
+
+## 11. `hrmax_candidate`
+
+The current per-ride candidate is based on the best 10-second HR.
+
+The program then assesses how well that high HR was sustained.
+
+### High confidence
+
+A candidate can be labelled `high` when:
+
+- the 10-second value is at least 95% of supplied HRmax;
+- the 30-second value is within 3 bpm of the 10-second value;
+- the 60-second value is within 6 bpm of the 10-second value.
+
+### Medium confidence
+
+A candidate can be labelled `medium` when:
+
+- the 10-second value is at least 92% of supplied HRmax;
+- the 30-second value is within 5 bpm of the 10-second value.
+
+### Low confidence
+
+Used when the high-HR evidence is too short, too low, or otherwise weak.
+
+If the candidate is more than 10 bpm above the supplied yearly HRmax, the reason explicitly warns that it may be a sensor artefact.
+
+### Recommended use
+
+Do not simply take the highest candidate in a year.
+
+Look for:
+
+- repeated candidates;
+- physiological consistency;
+- sustained 30s/60s support;
+- a ride context where a maximal effort is plausible;
+- agreement with neighbouring years.
+
+Old HR straps can create sustained-looking errors, so historical HRmax should be treated as an evidence-based estimate.
+
+---
+
+# Sustained heart-rate observations
+
+## 12. 30-minute HR
+
+```text
+best_30m_hr
+```
+
+Highest rolling 30-minute average HR.
+
+This can be useful threshold evidence, but a high 30-minute HR alone is **not sufficient for a numerical LT2 estimate**.
+
+---
+
+## 13. 60-minute HR
+
+```text
+best_60m_hr
+```
+
+Highest rolling 60-minute average HR.
+
+This is an important part of the LT2 evidence rules.
+
+---
+
+## 14. 90-minute HR
+
+```text
+best_90m_hr
+```
+
+Highest rolling 90-minute HR observation.
+
+This is especially useful for long sustained climbs that naturally fall between the existing 60-minute and 2-hour durations.
+
+It is descriptive and is not automatically labelled as a physiological threshold.
+
+---
+
+## 15. 2-hour sustained HR
+
+Fields:
+
+```text
+best_2h_hr
+best_2h_moving_fraction
+best_2h_hr_p10
+best_2h_hr_p90
+```
+
+The program intentionally does **not** label this LT1.
+
+It answers a simpler question:
+
+> What was the highest observed average HR over a reasonably continuous two-hour period?
+
+P10 and P90 are reported as descriptive information about the HR distribution but are **not** used to accept/reject the window.
+
+---
+
+## 16. 4-hour sustained HR
+
+Fields:
+
+```text
+best_4h_hr
+best_4h_moving_fraction
+best_4h_hr_p10
+best_4h_hr_p90
+```
+
+Again, this is **not automatically called LT1**.
+
+The purpose is to provide a long-duration aerobic reference:
+
+> What was the highest average HR actually sustained over a real four-hour period without a substantial recovery break?
+
+These observations can be useful when thinking about the likely LT1 region, but interpretation is left to the user.
+
+---
+
+## 17. Five-minute stop rule for 2h/4h windows
+
+Long-duration windows allow normal riding interruptions such as:
+
+- summit photographs;
+- bottle filling;
+- short traffic stops;
+- junctions;
+- short mechanical interruptions.
+
+A window is rejected when it contains a **single stopped episode longer than 5 minutes**.
+
+A recording/autopause gap longer than 5 minutes is also treated as excessive rest.
+
+This prevents a lunch stop or other substantial recovery from making a 2h/4h average appear more sustainable than it really was.
+
+### What counts as stopped?
+
+Movement is currently classified as stopped when estimated speed is below:
+
+```text
+2 km/h
+```
+
+Short stopped periods can accumulate; cumulative stopped percentage alone does not reject the window.
+
+### HR spread
+
+Older versions used a P10–P90 spread restriction.
+
+That restriction has been removed.
+
+Mountain rides naturally contain climbs, descents and easier sections, so a wide HR distribution is not itself a reason to discard a long-duration observation.
+
+---
+
+
+## Interval session detail
+
+When an activity is classified as an interval session, the CSV now preserves the HR-detected work/recovery structure instead of only writing a generic label such as `supra-threshold intervals`.
+
+Fields are:
+
+```text
+interval_count
+interval_work_total
+interval_work_median
+interval_work_avg_hr
+interval_work_max_hr
+interval_recovery_median
+interval_recovery_avg_hr
+interval_work_durations
+interval_work_avg_hrs
+interval_work_max_hrs
+interval_recovery_durations
+interval_recovery_avg_hrs
+interval_summary
+```
+
+The list fields use `|` as a separator. Example:
+
+```text
+interval_count:               4
+interval_work_durations:      0:07:44|0:07:48|0:07:51|0:07:50
+interval_work_avg_hrs:        165.4|167.3|168.2|169.1
+interval_work_max_hrs:        166|168|169|170
+interval_recovery_durations:  0:04:14|0:04:10|0:04:08
+interval_recovery_avg_hrs:    135.1|136.8|137.7
+interval_summary:             4 detected hard-HR blocks; median 0:07:49 @ 167.5 bpm; median recovery 0:04:10 @ 136.5 bpm
+```
+
+These are **HR-detected hard blocks**, not exact prescribed or lap durations. Heart rate rises and falls with a delay after workload changes, so a real 8-minute interval may appear as roughly 7 minutes 30 seconds to 8 minutes of HR above the detection threshold. This is intentional: the software reports what the HR trace supports rather than inventing exact workout timing.
+
+Interval detail is only populated when the existing classifier identifies a genuine interval session (normally at least three separate hard groups with active recoveries). Sustained climbs interrupted by traffic, photos or short easing are still treated separately.
+
+---
+
+# LT2 analysis
+
+## 18. LT2 philosophy
+
+The program treats LT2 estimation cautiously.
+
+HR alone cannot identify LT2 with laboratory precision.
+
+The output is therefore evidence, not a diagnosis.
+
+Key fields are:
+
+```text
+lt2_low
+lt2_high
+lt2_evidence
+lt2_reason
+lt2_clue
+```
+
+Possible evidence labels include:
+
+```text
+strong
+moderate
+low
+none
+```
+
+---
+
+## 19. Strong LT2 evidence
+
+A numerical LT2 range requires credible 60-minute evidence.
+
+The current logic looks for:
+
+- sustained hard effort rather than an interval session;
+- 30-minute HR in a plausible threshold region;
+- 60-minute HR in a plausible threshold region;
+- substantial time around the high-intensity region.
+
+The threshold search region is approximately:
+
+```text
+82% to 93% of supplied HRmax
+```
+
+A strong result can then produce:
+
+```text
+lt2_low
+lt2_high
+```
+
+---
+
+## 20. Thirty-minute-only evidence
+
+A strong 30-minute effort without supporting 60-minute evidence does **not** produce a numerical LT2 range.
+
+Instead it produces a moderate clue such as:
+
+```text
+30m HR 164.0 bpm suggests LT2 is probably at or below about 164 bpm
+```
+
+This prevents a hard 30-minute effort from being mistaken for a one-hour threshold.
+
+---
+
+## 21. Interval sessions
+
+If the ride is classified as an interval session, the program does not make a direct numerical LT2 estimate from it.
+
+Intervals are useful training evidence, but recovery periods make them unsuitable for direct LT2 inference.
+
+---
+
+# HR artefact handling
+
+## 22. Artefact flags
+
+Fields:
+
+```text
+hr_artefact
+excluded_hr_samples
+```
+
+The analyser includes logic for suspicious high HR during descending, where static/electrical interference or bad chest-strap contact can sometimes create false values.
+
+The raw and analysed maxima are therefore both retained.
+
+### Important limitation
+
+Artefact detection is not perfect.
+
+Older sensors can generate sustained-looking false HR that survives automated filtering.
+
+For historical data, give more weight to:
+
+- repeated observations;
+- long sustained patterns;
+- plausible ride context;
+- consistency across neighbouring years;
+
+and less weight to isolated extreme values.
+
+---
+
+# VAM / climbing analysis
+
+## 23. VAM fields
+
+Per ride:
+
+```text
+vam_15
+vam_30
+vam_60
+vam_retention_pct
+vam_comparison
+```
+
+VAM is vertical ascent speed in metres per hour.
+
+---
+
+## 24. Minimum ascent requirements
+
+A VAM window must include approximately the requested duration and enough net climbing.
+
+Current minimum net ascent is:
+
+| Window | Minimum gain |
+|---|---:|
+| 15 min | 40 m |
+| 30 min | 75 m |
+| 60 min | 150 m |
+
+The elevation trace is median-filtered to reduce GPS/barometric noise.
+
+---
+
+## 25. Comparable VAM
+
+The scanner distinguishes VAM observations judged suitable for comparison.
+
+The seasonal summary only uses rides whose `vam_comparison` starts with:
+
+```text
+comparable:
+```
+
+for its main comparable-VAM statistics.
+
+This helps avoid comparing a clean sustained climb with a window dominated by rolling terrain or unrelated activity structure.
+
+---
+
+## 26. VAM retention
+
+```text
+vam_retention_pct
+```
+
+is approximately:
+
+```text
+100 × 30-minute VAM / 15-minute VAM
+```
+
+It indicates how well climbing rate is maintained as duration increases.
+
+A high percentage means the 30-minute climbing rate was close to the best 15-minute rate.
+
+---
+
+## 27. 60-minute VAM
+
+```text
+vam_60
+```
+
+adds a longer-duration climbing-performance observation.
+
+It can be especially useful in archives containing long Alpine climbs.
+
+The seasonal summary reports top comparable 60-minute VAM values when available.
+
+---
+
+## 28. Bike context
+
+When `activities.csv` is available, the output includes:
+
+```text
+activity_gear
+bike_weight
+bike_id
+```
+
+The summary also reports comparable VAM by bike.
+
+This is important because VAM depends not only on fitness but also on:
+
+- bike weight;
+- tyres;
+- road vs MTB use;
+- surface;
+- gradient;
+- conditions;
+- system weight.
+
+The program deliberately does **not** invent a weight-normalized pseudo-power score.
+
+Raw VAM is retained, and bike/gear is supplied as context.
+
+---
+
+# Distance and elevation
+
+## 29. Per-ride distance
+
+```text
+distance_km
+```
+
+Device distance is preferred when available.
+
+GPS/haversine distance is used as a fallback.
+
+Very large recording gaps are not blindly bridged when calculating the per-ride total.
+
+---
+
+## 30. Per-ride elevation gain
+
+```text
+elevation_gain_m
+```
+
+Positive elevation changes are summed from a median-filtered elevation trace.
+
+This reduces sensitivity to GPS/barometric noise.
+
+---
+
+# Annual volume
+
+## 31. Why annual volume uses `activities.csv`
+
+Physiological analysis can only use files with sufficient HR data.
+
+That would make a year where the HR strap was rarely used look artificially inactive.
+
+Therefore, when `activities.csv` is present, annual volume is calculated from **all Strava metadata rows matching the requested year and sport**, including activities without usable HR.
+
+The summary reports:
+
+```text
+Activities in Strava metadata
+Total moving time
+Total distance
+Total elevation gain
+Long rides >=3h / >=4h / >=6h
+```
+
+This makes historical interpretation much more robust.
+
+For example, a year with only 14 HR-analyzed rides can still correctly show high total cycling volume if many rides were recorded without HR.
+
+---
+
+# CSV columns
+
+## 32. Identification and Strava metadata
+
+```text
+filename
+activity_date
+activity_type
+strava_activity_id
+activity_name
+activity_gear
+bike_weight
+bike_id
+athlete_weight
+```
+
+---
+
+## 33. Basic activity metrics
+
+```text
+duration
+average_hr
+raw_max_hr
+analysed_max_hr
+distance_km
+elevation_gain_m
+```
+
+---
+
+## 34. HRmax evidence
+
+```text
+hrmax_10s
+hrmax_30s
+hrmax_60s
+hrmax_candidate
+hrmax_confidence
+hrmax_reason
+```
+
+---
+
+## 35. Sustained HR
+
+```text
+best_30m_hr
+best_60m_hr
+best_90m_hr
+
+best_2h_hr
+best_2h_moving_fraction
+best_2h_hr_p10
+best_2h_hr_p90
+
+best_4h_hr
+best_4h_moving_fraction
+best_4h_hr_p10
+best_4h_hr_p90
+```
+
+---
+
+## 36. VAM
+
+```text
+vam_15
+vam_30
+vam_60
+vam_retention_pct
+vam_comparison
+```
+
+---
+
+## 37. Intensity and classification
+
+```text
+time_85pct_seconds
+time_90pct_seconds
+overall_ride
+key_effort
+classification
+confidence
+```
+
+`time_85pct_seconds` and `time_90pct_seconds` are based on the supplied yearly `--hrmax`.
+
+---
+
+## 38. LT2
+
+```text
+lt2_low
+lt2_high
+lt2_evidence
+lt2_reason
+lt2_clue
+```
+
+---
+
+## 39. Artefact and status
+
+```text
+hr_artefact
+excluded_hr_samples
+status
+error
+```
+
+---
+
+# Seasonal summary
+
+## 40. Annual volume section
+
+When metadata is available:
+
+```text
+Activities in Strava metadata
+Total moving time
+Total distance
+Total elevation gain
+Long rides >=3h / >=4h / >=6h
+```
+
+---
+
+## 41. LT2 section
+
+The scanner reports:
+
+```text
+Strong LT2 observations
+Moderate LT2 observations
+Median strong LT2 range
+```
+
+The median strong range is much more useful historically than blindly selecting the single highest ride.
+
+---
+
+## 42. Sustained HR section
+
+The scanner reports the top observations for:
+
+```text
+30m
+60m
+90m
+2h
+4h
+```
+
+For long-duration values it also reports how many qualifying windows were found.
+
+---
+
+## 43. HRmax section
+
+The summary prints the five highest candidates labelled:
+
+```text
+high
+medium
+```
+
+followed by the highest raw HR observations.
+
+This makes it easy to see the difference between:
+
+```text
+credible sustained HRmax evidence
+```
+
+and:
+
+```text
+raw sensor maxima
+```
+
+---
+
+## 44. VAM section
+
+The scanner reports:
+
+```text
+Comparable VAM activities
+Top comparable 15m VAM
+Top comparable 30m VAM
+Top comparable 60m VAM
+Median comparable VAM retention
+```
+
+When gear data exists it also shows comparable VAM grouped by bike.
+
+---
+
+# One-off activity analysis
+
+## 45. Running the analyser directly
+
+For detailed analysis of one activity:
+
+```bash
+python3 analyze_training_v10.py ride.gpx --hrmax 184
+```
+
+FIT example:
+
+```bash
+python3 analyze_training_v10.py ride.fit.gz --hrmax 184
+```
+
+With a known LT2:
+
+```bash
+python3 analyze_training_v10.py ride.gpx --hrmax 184 --lt2 162
+```
+
+The one-off analyser prints more detail than the batch scanner, including:
+
+- terrain context;
+- average and maximum HR;
+- HRmax evidence;
+- best sustained HR observations;
+- VAM;
+- hard blocks;
+- effort grouping;
+- classification;
+- LT2 evidence;
+- artefact information.
+
+---
+
+# Suggested historical workflow
+
+## 46. Analyse one year at a time
+
+Example:
+
+```bash
+python3 scan_strava_v12.py /data/Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv /data/Strava/activities.csv
+```
+
+Repeat for each year.
+
+---
+
+## 47. Choose HRmax sensibly
+
+Start with a reasonable annual estimate.
+
+Then inspect:
+
+```text
+hrmax_candidate
+hrmax_confidence
+hrmax_reason
+hrmax_30s
+hrmax_60s
+```
+
+and the seasonal `Highest credible HRmax candidates`.
+
+If the evidence suggests the estimate is wrong, rerun the year with a revised `--hrmax`.
+
+---
+
+## 48. Interpret LT2 across several rides
+
+Prefer:
+
+- repeated strong observations;
+- sustained climbs;
+- sustained flat hard efforts;
+- agreement between 30m and 60m;
+- consistency across a season.
+
+Avoid using:
+
+- interval sessions as direct LT2 estimates;
+- isolated raw HR maxima;
+- one unusually high 30-minute effort.
+
+---
+
+## 49. Use 4h HR as a long-duration clue, not an automatic LT1 label
+
+The program deliberately reports:
+
+```text
+best_4h_hr
+```
+
+rather than:
+
+```text
+LT1
+```
+
+A clean four-hour observation with very high moving fraction and no long rest can be useful evidence about sustainable aerobic intensity.
+
+However, terrain, heat, fatigue, descending and pacing all influence the result.
+
+---
+
+## 50. Use annual volume to explain performance
+
+When comparing years, do not interpret VAM or threshold changes without considering:
+
+- total riding hours;
+- total distance;
+- total elevation;
+- number of long rides;
+- bike type;
+- changes in available training time;
+- injury;
+- illness;
+- exceptional events such as lockdown.
+
+Short-term changes in training opportunity can be much larger than normal age-related decline.
+
+---
+
+# Troubleshooting
+
+## 51. `FIT support requires fitparse`
+
+Install:
+
+```bash
+python3 -m pip install fitparse
+```
+
+---
+
+## 52. `activities.csv not found`
+
+Either specify it explicitly:
+
+```bash
+--activities-csv /path/to/activities.csv
+```
+
+or place it in the parent directory of the activity folder.
+
+The analysis still works without metadata if you simply omit `--activities-csv`, but annual volume and gear enrichment will be unavailable.
+
+---
+
+## 53. `CSV rows missing file`
+
+The metadata row exists, but the corresponding GPX/FIT/TCX file is not present in the supplied activity directory.
+
+Check the directory you passed as the positional argument.
+
+---
+
+## 54. `Not enough valid HR samples`
+
+The file contains too little usable HR after applying:
+
+```text
+--min-hr
+--max-hr
+```
+
+and artefact exclusion.
+
+This is expected for activities recorded without an HR sensor.
+
+---
+
+## 55. XML `unbound prefix`
+
+Some old GPX files contain malformed XML namespace prefixes.
+
+Example:
+
+```text
+unbound prefix: line 1395, column 127
+```
+
+This is a problem in the source GPX, not in the physiological analysis.
+
+The file may need to be repaired or converted before it can be read.
+
+---
+
+## 56. Lots of raw HR values over plausible HRmax
+
+Do not raise `--hrmax` merely because old files contain values such as:
+
+```text
+206
+215
+220
+```
+
+Inspect the sustained HRmax candidates and the surrounding ride context.
+
+Old chest straps can produce convincing but false high-HR episodes.
+
+---
+
+## 57. A 4-hour ride has no `best_4h_hr`
+
+Possible reasons include:
+
+- the actual HR-recorded duration is less than four hours;
+- insufficient valid HR samples;
+- a stopped episode longer than five minutes;
+- a recording/autopause gap longer than five minutes.
+
+P10–P90 spread is **not** a rejection criterion.
+
+---
+
+## 58. VAM looks unexpectedly low
+
+Check:
+
+- bike;
+- MTB vs road;
+- tyre type;
+- surface;
+- gradient;
+- whether the VAM window is marked comparable;
+- whether the route is rolling rather than one sustained climb.
+
+Do not compare all bikes as if they were equivalent.
+
+---
+
+# Design principles
+
+The analysis deliberately follows a few conservative rules:
+
+1. **Observed data before labels.**  
+   Report 2h/4h sustained HR rather than automatically declaring LT1.
+
+2. **Sustained evidence before maxima.**  
+   HRmax confidence uses 10s/30s/60s support rather than a one-second spike.
+
+3. **60-minute evidence before numerical LT2.**  
+   A hard 30-minute effort alone only provides a clue.
+
+4. **Intervals are not direct LT2 tests.**
+
+5. **Raw VAM stays raw.**  
+   Bike metadata provides context instead of creating an artificial normalization formula.
+
+6. **Historical sensor data is noisy.**  
+   Repeated patterns matter more than isolated extremes.
+
+7. **Training context matters.**  
+   Annual volume, injury, lifestyle and bike use can explain large performance changes independently of ageing.
+
+---
+
+# Example project layout
+
+```text
+analysis/
+├── scan_strava_v12.py
+├── activity_file_processor_v10.py
+├── analyze_training_v10.py
+├── cycling_2015.csv
+├── cycling_2016.csv
+└── ...
+
+Strava/
+├── activities.csv
+└── activities/
+    ├── 318152282.fit.gz
+    ├── 341398533.fit.gz
+    ├── ...
+```
+
+Example command from `analysis/`:
+
+```bash
+python3 scan_strava_v12.py ../Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv ../Strava/activities.csv
+```
+
+---
+
+# Important caveat
+
+This project analyses historical exercise data and provides heuristic physiological evidence.
+
+It is not a laboratory lactate test, metabolic cart, ECG or medical diagnostic tool.
+
+Values such as HRmax, LT2 and long-duration HR should be interpreted as estimates and observations, especially when using old sensor data.
