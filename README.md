@@ -1,10 +1,16 @@
-# Strava Training Analysis
+# Training Analysis
 
-A small Python toolkit for analysing historical Strava activity exports, with a particular focus on:
+A toolkit for data mining historical fitness activity written in
+Python. Basically you can export all of your Strava activities
+and let this script analyze them. The output can be loaded into an AI to
+get insights and advice about training or can be used by
+actual humans like coaches.
 
-- heart-rate evidence across multiple durations;
-- per-ride HRmax evidence;
-- cautious LT2 estimation;
+It offers the following features
+
+- heart-rate analysis across multiple durations;
+- per-ride and per season HRmax evidence;
+- LT2 estimation;
 - long-duration sustained heart-rate observations;
 - climbing performance using VAM;
 - annual cycling volume, distance and elevation;
@@ -13,11 +19,9 @@ A small Python toolkit for analysing historical Strava activity exports, with a 
 
 The current versions are:
 
-- `scan_strava_v12.py` — batch scanner and yearly summary;
-- `activity_file_processor_v10.py` — per-file wrapper used by the scanner;
-- `analyze_training_v10.py` — underlying activity analysis engine.
-
-The scanner is **training-analysis only**. The older standalone/legacy HR-only scan mode has been removed.
+- `scan_strava.py` — batch scanner and yearly summary;
+- `activity_file_processor.py` — per-file wrapper used by the scanner;
+- `analyze_training.py` — underlying activity analysis engine.
 
 ---
 
@@ -45,10 +49,6 @@ activity_file_processor_v10.py
 analyze_training_v10.py
 ```
 
-The import names are versioned, so do not rename only one of the three files unless you also update the imports.
-
----
-
 ## 2. Supported activity files
 
 The scanner understands:
@@ -62,7 +62,8 @@ The scanner understands:
 .fit.gz
 ```
 
-Files are scanned from the **single directory supplied on the command line**. The scanner is not recursive.
+Files are scanned from the **single directory supplied on the command line**. The scanner is not recursive. It can
+work directly with Strava batch exports.
 
 Example:
 
@@ -1552,3 +1553,96 @@ This project analyses historical exercise data and provides heuristic physiologi
 It is not a laboratory lactate test, metabolic cart, ECG or medical diagnostic tool.
 
 Values such as HRmax, LT2 and long-duration HR should be interpreted as estimates and observations, especially when using old sensor data.
+
+# Appendix
+## Example output
+
+```text
+Supported files found: 212
+Filtered out:          0
+Activities analysed:   55
+Errors:                157
+CSV written to:        cycling_2022.csv
+
+Season summary: 2022 / cycling
+------------------------------------------------
+Activities analysed:              55
+Errors:                           157
+Activities in Strava metadata:    212
+Total moving time:                170.6 h
+Total distance:                   3404 km
+Total elevation gain:             51664 m
+Long rides >=3h / >=4h / >=6h:   6 / 4 / 1
+Strong LT2 observations:          2
+Moderate LT2 observations:        3
+Median strong LT2 range:           156.8-160.8 bpm
+Top 30m HR observations:           175.8, 169.3, 169.2
+Top 60m HR observations:           172.8, 160.6, 157.7
+Top 90m HR observations:           171.4, 149.6, 148.0
+Highest credible HRmax candidates:
+  183.0 bpm (high)  11 Mar 2022 11:26
+  181.7 bpm (high)  12 Nov 2022 12:41
+  180.0 bpm (high)  16 Oct 2022 14:21
+  179.8 bpm (high)  08 Dec 2022 14:01
+  179.5 bpm (high)  02 Oct 2022 12:25
+Highest raw HR observations:        198, 197, 195, 192, 188
+Qualifying 2h sustained windows:   12
+Top 2h sustained HR observations:   164.2, 160.3, 157.4
+Qualifying 4h sustained windows:   2
+Top 4h sustained HR observations:   144.8, 143.6
+Comparable VAM activities:         11
+Top comparable 15m VAM:            909, 888, 875 m/h
+Top comparable 30m VAM:            872, 846, 843 m/h
+Top comparable 60m VAM:            801, 738, 725 m/h
+Median comparable VAM retention:   93.3%
+
+VAM by bike (comparable activities)
+------------------------------------------------
+Commuter (23 rides, 10.2 kg)
+  comparable VAM: 1
+  15m VAM median/best: 842 / 842 m/h
+  30m VAM median/best: 681 / 681 m/h
+  60m VAM median/best: 434 / 434 m/h
+  median retention: 80.9%
+Spitfeur (13 rides, 8.2 kg)
+  comparable VAM: 5
+  15m VAM median/best: 846 / 875 m/h
+  30m VAM median/best: 795 / 843 m/h
+  60m VAM median/best: 711 / 738 m/h
+  median retention: 93.3%
+F60 (5 rides, 8.0 kg)
+  comparable VAM: 3
+  15m VAM median/best: 888 / 909 m/h
+  30m VAM median/best: 846 / 872 m/h
+  60m VAM median/best: 687 / 801 m/h
+  median retention: 98.2%
+unknown (4 rides)
+  comparable VAM: 1
+  15m VAM median/best: 760 / 760 m/h
+  30m VAM median/best: 722 / 722 m/h
+  60m VAM median/best: 508 / 508 m/h
+  median retention: 95.0%
+Winter Bike (1 rides)
+  comparable VAM: 1
+  15m VAM median/best: 858 / 858 m/h
+  30m VAM median/best: 741 / 741 m/h
+  60m VAM median/best: 710 / 710 m/h
+  median retention: 86.4%
+
+```
+
+The analysis detected 6 interval sessions - I was trying to work on my climbing speed:
+```text
+  22 Aug 2022 16:05  Evening Ride: 4 detected hard-HR blocks; median 0:08:08 @ 166.8 bpm; median recovery 0:07:11 @ 139.1 bpm
+  26 Aug 2022 10:16  Lunch Ride: 4 detected hard-HR blocks; median 0:08:04 @ 166.0 bpm; median recovery 0:03:03 @ 136.5 bpm
+  31 Aug 2022 15:52  4x8s: 4 detected hard-HR blocks; median 0:08:02 @ 169.1 bpm; median recovery 0:02:39 @ 142.7 bpm
+  05 Sep 2022 16:01  Evening Ride: 3 detected hard-HR blocks; median 0:08:35 @ 171.8 bpm; median recovery 0:02:58 @ 143.0 bpm
+  27 Oct 2022 08:53  High plains grifter: 4 detected hard-HR blocks; median 0:05:51 @ 160.9 bpm; median recovery 0:34:23 @ 140.1 bpm
+  08 Dec 2022 14:01  Afternoon Ride: 3 detected hard-HR blocks; median 0:09:19 @ 167.6 bpm; median recovery 0:04:26 @ 139.3 bpm
+```
+
+To drill down further in the CSV file for the 26th August ride it automatically
+classifies it as an : _endurance    supra-threshold intervals_ session lasting _1:31:26_
+and says it  detected : _4 hard-HR blocks_ with a _median duration of 0:08:04 @ 166.0 bpm  and a  median recovery 0:03:03 @ 136.5_ bpm and it gives the blocks as _0:08:22|0:07:47|0:07:36|0:10:06._
+
+

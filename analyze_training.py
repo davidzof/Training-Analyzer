@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Training-session analyser v8.
+Training-session analyser v10.
 
 Main ideas
 ----------
