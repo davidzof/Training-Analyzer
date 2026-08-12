@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Training-session analyser v10.
+Training-session analyser.
+
 
 Main ideas
 ----------
@@ -29,16 +30,18 @@ This remains a heuristic analyser. HR-only files cannot directly measure LT1/LT2
 
 Examples
 --------
-python3 analyze_training_v6.py ride.gpx --hrmax 184
-python3 analyze_training_v6.py ride.gpx --hrmax 184 --lt2 162
+python3 analyze_training.py ride.gpx --hrmax 184
+python3 analyze_training.py ride.gpx --hrmax 184 --lt2 162
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import gzip
 import io
 import math
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -47,6 +50,127 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean, median
 
+
+
+# ---------------------------------------------------------------------------
+# Optional single-file Strava metadata update
+# ---------------------------------------------------------------------------
+
+def _normalise_export_filename(value: str | None) -> str | None:
+    """Return the basename used to match a Strava activities.csv row."""
+    if not value:
+        return None
+    text = str(value).strip().replace("\\", "/")
+    return Path(text).name or None
+
+
+def _strava_activity_type(activity_type: str | None) -> str:
+    """Map the analyser's normalised sport names to common Strava labels."""
+    mapping = {
+        "cycling": "Ride",
+        "running": "Run",
+        "walking": "Walk",
+        "hiking": "Hike",
+        "skiing": "NordicSki",
+        "roller skiing": "RollerSki",
+    }
+    if not activity_type:
+        return ""
+    return mapping.get(activity_type.strip().lower(), activity_type)
+
+
+def _strava_date_string(dt: datetime) -> str:
+    """Format a timestamp like Strava's export metadata."""
+    hour = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.strftime('%b')} {dt.day}, {dt.year}, {hour}:{dt.minute:02d}:{dt.second:02d} {ampm}"
+
+
+def resolve_single_activity_csv(activity_path: Path, explicit: Path | None) -> Path | None:
+    """Find activities.csv for a single activity.
+
+    With the normal Strava layout ``Strava/activities/file.fit``, the metadata
+    file is ``Strava/activities.csv``. An explicit path always wins.
+    """
+    if explicit is not None:
+        return explicit.expanduser()
+
+    activity_path = activity_path.expanduser().resolve()
+    candidates = [
+        activity_path.parent.parent / "activities.csv",
+        activity_path.parent / "activities.csv",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def append_single_activity_metadata(path: Path, analysis: "ActivityAnalysis") -> bool:
+    """Append one minimal row to a Strava activities.csv if it is absent.
+
+    The original column order and existing rows are preserved. Only values that
+    can be reconstructed reliably from the local activity file are populated;
+    Strava-only fields such as activity ID, gear and calories remain blank.
+    A one-time ``activities.csv.bak`` backup is created before the first append.
+
+    Returns True when a new row was appended, False when it was already present.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"activities.csv not found: {path}")
+
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        existing = {
+            _normalise_export_filename(row.get("Filename"))
+            for row in reader
+            if row.get("Filename")
+        }
+
+    required = {
+        "Filename", "Activity Date", "Activity Type", "Elapsed Time",
+        "Moving Time", "Distance", "Elevation Gain",
+    }
+    missing = sorted(required - set(fieldnames))
+    if missing:
+        raise ValueError(
+            "activities.csv cannot be updated; missing columns: " + ", ".join(missing)
+        )
+
+    filename = analysis.path.name
+    if filename in existing:
+        return False
+
+    record = {name: "" for name in fieldnames}
+    record["Filename"] = f"activities/{filename}"
+    record["Activity Date"] = _strava_date_string(analysis.start_time)
+    record["Activity Type"] = _strava_activity_type(analysis.activity_type)
+    duration_s = int(round(analysis.duration_s))
+    record["Elapsed Time"] = str(duration_s)
+    record["Moving Time"] = str(duration_s)
+    record["Distance"] = f"{analysis.distance_m:.1f}"
+    if analysis.elevation_gain_m is not None:
+        record["Elevation Gain"] = f"{analysis.elevation_gain_m:.1f}"
+    if "Activity Name" in record:
+        # Remove both compression and activity-format suffixes where possible.
+        name = filename
+        if name.lower().endswith(".gz"):
+            name = name[:-3]
+        for suffix in (".gpx", ".tcx", ".fit"):
+            if name.lower().endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        record["Activity Name"] = name
+
+    backup = path.with_suffix(path.suffix + ".bak")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writerow(record)
+    return True
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -1348,16 +1472,16 @@ class ActivityAnalysis:
     end_time: datetime
     duration_s: float
     terrain: str
-    raw_average_hr: float
-    average_hr: float
-    raw_max_hr: int
-    analysed_max_hr: int
+    raw_average_hr: float | None
+    average_hr: float | None
+    raw_max_hr: int | None
+    analysed_max_hr: int | None
     hrmax_10s: float | None
     hrmax_30s: float | None
     hrmax_60s: float | None
     hrmax_candidate: float | None
-    hrmax_confidence: str
-    hrmax_reason: str
+    hrmax_confidence: str | None
+    hrmax_reason: str | None
     best30_hr: float | None
     best60_hr: float | None
     best90_hr: float | None
@@ -1368,27 +1492,31 @@ class ActivityAnalysis:
     vam60: VamResult | None
     vam_retention_pct: float | None
     vam_comparison_text: str | None
-    time85_s: float
-    time90_s: float
-    detection_threshold: float
+    time85_s: float | None
+    time90_s: float | None
+    detection_threshold: float | None
     blocks: list[Block]
     gaps: list[GapInfo]
     groups: list[EffortGroup]
     interval_summary: IntervalSummary | None
-    overall: str
-    key_effort: str
-    classification: str
-    confidence: str
+    overall: str | None
+    key_effort: str | None
+    classification: str | None
+    confidence: str | None
     lt2_low: float | None
     lt2_high: float | None
-    lt2_evidence: str
-    lt2_reason: str
+    lt2_evidence: str | None
+    lt2_reason: str | None
     lt2_clue: str | None
     suspicious_descent_samples: list[Sample]
     artefact_intervals: list[tuple[datetime, datetime]]
     excluded_hr_samples: int
     distance_m: float
     elevation_gain_m: float | None
+    has_hr: bool
+    has_elevation: bool
+    has_gps: bool
+    has_power: bool
 
 
 def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
@@ -1396,28 +1524,127 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
     """
     Analyse one activity and return structured results.
 
-    This is the public API used by activity_file_processor.py. The CLI below
-    uses the same function, ensuring batch and one-off analysis stay identical.
+    Heart rate is optional. Distance, elevation and VAM are extracted whenever
+    the source file supports them. HR-derived metrics are populated only when
+    at least two usable HR samples remain after validity/artefact filtering.
     """
     path = Path(path).expanduser()
     activity_type, all_samples = read_samples(path)
+    if len(all_samples) < 2:
+        raise ValueError("Not enough timestamped activity samples")
+
+    start_time = all_samples[0].timestamp
+    end_time = all_samples[-1].timestamp
+    duration = (end_time-start_time).total_seconds()
+    if duration <= 0:
+        raise ValueError("Activity has no positive duration")
+
+    has_elevation = sum(s.elevation is not None for s in all_samples) >= 2
+    has_gps = sum(s.lat is not None and s.lon is not None for s in all_samples) >= 2
+    # Placeholder for future recorded-power support.
+    has_power = False
+
+    # Non-HR metrics are deliberately calculated before deciding whether the
+    # activity contains usable HR. A ride without HR can still contribute VAM,
+    # distance, elevation and historical training context.
+    vam15 = best_vam(all_samples, 15*60, 40)
+    vam30 = best_vam(all_samples, 30*60, 75)
+    vam60 = best_vam(all_samples, 60*60, 150)
+
+    distance_m = 0.0
+    for a, b in zip(all_samples, all_samples[1:]):
+        dt = (b.timestamp-a.timestamp).total_seconds()
+        if 0 < dt <= 60:
+            distance_m += max(0.0, segment_distance_m(a, b))
+
+    elev_series = _elevation_series(all_samples)
+    elevation_gain_m = None
+    if len(elev_series) >= 2:
+        gain = 0.0
+        for a, b in zip(elev_series, elev_series[1:]):
+            dt = (b.timestamp-a.timestamp).total_seconds()
+            if 0 < dt <= 60 and a.elevation is not None and b.elevation is not None:
+                delta = b.elevation-a.elevation
+                if delta > 0:
+                    gain += delta
+        elevation_gain_m = gain
 
     raw_hrs = hr_samples(all_samples, min_hr, max_hr)
-    if len(raw_hrs) < 2:
-        raise ValueError("Not enough valid HR samples")
+    suspicious = []
+    artefact_intervals = []
+    hrs = []
+    raw_avg_hr = None
+    raw_max = None
 
-    start_time = raw_hrs[0].timestamp
-    end_time = raw_hrs[-1].timestamp
-    duration = (end_time-start_time).total_seconds()
-    raw_avg_hr = mean(s.heart_rate for s in raw_hrs)
-    raw_max = max(s.heart_rate for s in raw_hrs)
+    if len(raw_hrs) >= 2:
+        raw_avg_hr = mean(s.heart_rate for s in raw_hrs)
+        raw_max = max(s.heart_rate for s in raw_hrs)
+        suspicious = suspicious_descent_hr(all_samples, raw_hrs, hrmax)
+        artefact_intervals = descent_artefact_intervals(suspicious)
+        hrs = exclude_artefact_hr_samples(raw_hrs, artefact_intervals)
 
-    suspicious = suspicious_descent_hr(all_samples, raw_hrs, hrmax)
-    artefact_intervals = descent_artefact_intervals(suspicious)
-    hrs = exclude_artefact_hr_samples(raw_hrs, artefact_intervals)
+    has_hr = len(hrs) >= 2
 
-    if len(hrs) < 2:
-        raise ValueError("Not enough valid HR samples after artefact filtering")
+    if not has_hr:
+        retention = None
+        comparison = None
+        if vam15 is not None and vam30 is not None and vam15.vam > 0:
+            retention = 100*vam30.vam/vam15.vam
+            comparison = vam_comparison(vam15, vam30, "unclassified (no usable HR)", all_samples)
+
+        return ActivityAnalysis(
+            path=path,
+            activity_type=activity_type,
+            start_time=start_time,
+            end_time=end_time,
+            duration_s=duration,
+            terrain=terrain_context(all_samples),
+            raw_average_hr=raw_avg_hr,
+            average_hr=None,
+            raw_max_hr=raw_max,
+            analysed_max_hr=None,
+            hrmax_10s=None,
+            hrmax_30s=None,
+            hrmax_60s=None,
+            hrmax_candidate=None,
+            hrmax_confidence=None,
+            hrmax_reason=None,
+            best30_hr=None,
+            best60_hr=None,
+            best90_hr=None,
+            sustained2h=None,
+            sustained4h=None,
+            vam15=vam15,
+            vam30=vam30,
+            vam60=vam60,
+            vam_retention_pct=retention,
+            vam_comparison_text=comparison,
+            time85_s=None,
+            time90_s=None,
+            detection_threshold=None,
+            blocks=[],
+            gaps=[],
+            groups=[],
+            interval_summary=None,
+            overall=None,
+            key_effort=None,
+            classification="unclassified (no usable HR)",
+            confidence=None,
+            lt2_low=None,
+            lt2_high=None,
+            lt2_evidence=None,
+            lt2_reason=None,
+            lt2_clue=None,
+            suspicious_descent_samples=suspicious,
+            artefact_intervals=artefact_intervals,
+            excluded_hr_samples=max(0, len(raw_hrs)-len(hrs)),
+            distance_m=distance_m,
+            elevation_gain_m=elevation_gain_m,
+            has_hr=False,
+            has_elevation=has_elevation,
+            has_gps=has_gps,
+            has_power=has_power,
+        )
 
     avg_hr = mean(s.heart_rate for s in hrs)
     analysed_max = max(s.heart_rate for s in hrs)
@@ -1426,8 +1653,6 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
     hrmax30 = best_hr_average(hrs, 30, max_gap_s=15.0)
     hrmax60 = best_hr_average(hrs, 60, max_gap_s=15.0)
 
-    # Per-ride HRmax evidence. The supplied yearly HRmax remains the analysis
-    # reference; this candidate is evidence for the user to inspect and rerun.
     hrmax_candidate = hrmax10
     hrmax_confidence = "low"
     hrmax_reason = "insufficient sustained high-HR evidence"
@@ -1455,31 +1680,6 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
     best30 = best_hr_average(hrs, 30*60)
     best60 = best_hr_average(hrs, 60*60)
     best90 = best_hr_average(hrs, 90*60)
-
-    vam15 = best_vam(all_samples, 15*60, 40)
-    vam30 = best_vam(all_samples, 30*60, 75)
-    vam60 = best_vam(all_samples, 60*60, 150)
-
-    # Whole-activity distance/elevation for per-ride context.  Distance prefers
-    # device distance where available and falls back to GPS. Elevation gain uses
-    # a median-filtered series to limit GPS/barometric noise.
-    distance_m = 0.0
-    for a, b in zip(all_samples, all_samples[1:]):
-        dt = (b.timestamp-a.timestamp).total_seconds()
-        if 0 < dt <= 60:
-            distance_m += max(0.0, segment_distance_m(a, b))
-
-    elev_series = _elevation_series(all_samples)
-    elevation_gain_m = None
-    if len(elev_series) >= 2:
-        gain = 0.0
-        for a, b in zip(elev_series, elev_series[1:]):
-            dt = (b.timestamp-a.timestamp).total_seconds()
-            if 0 < dt <= 60 and a.elevation is not None and b.elevation is not None:
-                delta = b.elevation-a.elevation
-                if delta > 0:
-                    gain += delta
-        elevation_gain_m = gain
 
     detection_threshold = lt2 if lt2 is not None else 0.85*hrmax
     blocks = detect_hard_blocks(hrs, detection_threshold)
@@ -1560,6 +1760,10 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         excluded_hr_samples=len(raw_hrs)-len(hrs),
         distance_m=distance_m,
         elevation_gain_m=elevation_gain_m,
+        has_hr=True,
+        has_elevation=has_elevation,
+        has_gps=has_gps,
+        has_power=has_power,
     )
 
 
@@ -1568,8 +1772,8 @@ def print_analysis(a: ActivityAnalysis):
     print(f"Activity type:   {a.activity_type or '-'}")
     print(f"Terrain:         {a.terrain}")
     print(f"Duration:        {fmt_time(a.duration_s)}")
-    print(f"Average HR:      {a.average_hr:.1f}")
-    print(f"Maximum HR:      {a.analysed_max_hr}")
+    print(f"Average HR:      {a.average_hr:.1f}" if a.average_hr is not None else "Average HR:      -")
+    print(f"Maximum HR:      {a.analysed_max_hr}" if a.analysed_max_hr is not None else "Maximum HR:      -")
 
     if a.artefact_intervals:
         suspicious_max = max(s.heart_rate for s in a.suspicious_descent_samples)
@@ -1649,6 +1853,11 @@ def print_analysis(a: ActivityAnalysis):
     print(f"Time >=90% max:  {fmt_time(a.time90_s)}")
     print()
 
+    if not a.has_hr:
+        print("Heart-rate analysis: no usable HR data")
+        print(f"Classification:      {a.classification}")
+        return
+
     print(f"Detected HR blocks using {a.detection_threshold:.0f} bpm:")
     if a.blocks:
         for i, b in enumerate(a.blocks, 1):
@@ -1708,6 +1917,20 @@ def main():
     p.add_argument("--lt2", type=float, default=None)
     p.add_argument("--min-hr", type=int, default=50)
     p.add_argument("--max-hr", type=int, default=220)
+    p.add_argument(
+        "--activities-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Path to Strava activities.csv. If omitted, the analyser looks for "
+            "activities.csv in the parent of the activity directory."
+        ),
+    )
+    p.add_argument(
+        "--no-update-metadata",
+        action="store_true",
+        help="Analyse the activity without appending it to activities.csv.",
+    )
     args = p.parse_args()
 
     try:
@@ -1719,6 +1942,26 @@ def main():
         return 1
 
     print_analysis(result)
+
+    if not args.no_update_metadata:
+        activities_csv = resolve_single_activity_csv(args.file, args.activities_csv)
+        if activities_csv is not None:
+            try:
+                added = append_single_activity_metadata(activities_csv, result)
+                if added:
+                    print(f"Metadata appended:  {activities_csv}")
+                else:
+                    print(f"Metadata already present: {activities_csv}")
+            except Exception as exc:
+                print(f"Warning: could not update activities.csv: {exc}", file=sys.stderr)
+        elif args.activities_csv is not None:
+            # Normally unreachable because an explicit path is returned even if
+            # missing, but retained for clear command-line behaviour.
+            print(
+                f"Warning: activities.csv not found: {args.activities_csv.expanduser()}",
+                file=sys.stderr,
+            )
+
     return 0
 
 

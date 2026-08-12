@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scan Strava GPX/TCX/FIT activity files for training analysis (V13).
+Scan GPX/TCX/FIT activity files for training analysis.
 
 This version is training-analysis only: --hrmax is required. It writes per-ride
 HRmax evidence, sustained HR observations (30m/60m/90m/2h/4h), VAM
@@ -9,14 +9,15 @@ HRmax evidence, sustained HR observations (30m/60m/90m/2h/4h), VAM
 When Strava activities.csv is available it also supplies bike metadata and
 annual/season volume totals (all matching activities, including rides without HR).
 
-V13 adds rolling 12-month seasons via --month and optional appending of newly
-analysed files to activities.csv via --add-missing-metadata.
+Structured JSON output is available via --json. Activities without usable HR
+are still retained for distance, elevation and VAM analysis.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from datetime import datetime
 from collections import Counter
@@ -66,6 +67,10 @@ TRAINING_CSV_FIELDS = [
     "vam_comparison",
     "time_85pct_seconds",
     "time_90pct_seconds",
+    "hard_block_threshold_bpm",
+    "hard_block_count",
+    "hard_blocks",
+    "hard_block_gaps",
     "interval_count",
     "interval_work_total",
     "interval_work_median",
@@ -92,6 +97,10 @@ TRAINING_CSV_FIELDS = [
     "excluded_hr_samples",
     "distance_km",
     "elevation_gain_m",
+    "has_hr",
+    "has_elevation",
+    "has_gps",
+    "has_power",
     "status",
     "error",
 ]
@@ -187,11 +196,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Write structured JSON instead of CSV. The JSON contains the period, "
+            "analysis parameters, season summary and the same per-activity fields "
+            "normally written to CSV."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
         help=(
-            "Output CSV. Defaults to training_<year>.csv or strava_training_summary.csv."
+            "Optional output path. If omitted, a descriptive filename is generated "
+            "from the year/season and sport."
         ),
     )
     return parser
@@ -286,8 +305,9 @@ def passes_filters(summary, year: int | None, month: int | None, sport: str | No
         return False
 
     if sport is not None:
-        actual = (summary.activity_type or "").strip().lower()
-        if actual != sport.strip().lower():
+        actual = normalize_strava_sport(summary.activity_type)
+        requested = normalize_strava_sport(sport)
+        if actual != requested:
             return False
 
     return True
@@ -395,8 +415,12 @@ def normalize_strava_sport(value: str | None) -> str | None:
         "walk": "walking",
         "hike": "walking",
         "nordicski": "skiing",
+        "nordicskiing": "skiing",
+        "crosscountryski": "skiing",
+        "crosscountryskiing": "skiing",
         "backcountryski": "skiing",
         "rollerski": "roller skiing",
+        "rollerskiing": "roller skiing",
     }
     return mapping.get(key, value.strip().lower())
 
@@ -415,7 +439,7 @@ def preselect_files_from_metadata(
     selected: list[Path] = []
     missing = 0
     matched_rows = 0
-    requested_sport = sport.strip().lower() if sport else None
+    requested_sport = normalize_strava_sport(sport) if sport else None
 
     for filename, info in metadata.items():
         if not date_in_window(info.get("strava_activity_date"), year, month):
@@ -534,16 +558,36 @@ def append_missing_metadata_rows(path: Path, rows: list[dict], existing: dict[st
     return len(additions)
 
 
+def _filename_slug(value: str | None) -> str:
+    if not value:
+        return "training"
+    key = value.strip().lower()
+    aliases = {
+        "skiing": "cross-country-skiing",
+        "nordic skiing": "cross-country-skiing",
+        "roller skiing": "roller-skiing",
+    }
+    if key in aliases:
+        return aliases[key]
+    slug = re.sub(r"[^a-z0-9]+", "-", key).strip("-")
+    return slug or "training"
+
+
 def default_output(args) -> Path:
     if args.output is not None:
         return args.output.expanduser()
 
-    if args.year is not None:
-        if args.month is not None:
-            return Path(f"training_{args.year}-{args.month:02d}.csv")
-        return Path(f"training_{args.year}.csv")
+    ext = "json" if args.json else "csv"
+    sport = _filename_slug(args.sport)
 
-    return Path("strava_training_summary.csv")
+    if args.year is not None and args.month is not None:
+        month_name = datetime(args.year, args.month, 1).strftime("%B").lower()
+        return Path(f"{month_name}-{args.year}-{sport}.{ext}")
+
+    if args.year is not None:
+        return Path(f"{args.year}-{sport}.{ext}")
+
+    return Path(f"{sport}.{ext}")
 
 
 def top_values(values, n=3):
@@ -565,7 +609,7 @@ def _metadata_matches(info: dict, year: int | None, month: int | None, sport: st
         return False
     if sport is not None:
         actual = normalize_strava_sport(info.get("strava_activity_type"))
-        if actual != sport.strip().lower():
+        if actual != normalize_strava_sport(sport):
             return False
     return True
 
@@ -603,8 +647,183 @@ def _duration_seconds_hms(value: str | None) -> float | None:
         return None
 
 
+def build_training_summary(rows: list[dict], year: int | None, month: int | None, sport: str | None, volume: dict | None = None) -> dict:
+    """Return the season summary as structured, JSON-friendly data."""
+    ok = [r for r in rows if r["status"] == "ok"]
+    errors = [r for r in rows if r["status"] == "error"]
+    with_hr = [r for r in ok if bool(r.get("has_hr"))]
+    without_hr = [r for r in ok if not bool(r.get("has_hr"))]
+
+    if year is not None:
+        start, end = season_bounds(year, month)
+        period = {
+            "start": start.date().isoformat() if start else None,
+            "end_exclusive": end.date().isoformat() if end else None,
+            "calendar_year": year if month is None else None,
+            "season_start_year": year if month is not None else None,
+            "season_start_month": month,
+        }
+    else:
+        period = {
+            "start": None,
+            "end_exclusive": None,
+            "calendar_year": None,
+            "season_start_year": None,
+            "season_start_month": None,
+        }
+
+    strong = [r for r in ok if r.get("lt2_evidence") == "strong"]
+    moderate = [r for r in ok if r.get("lt2_evidence") == "moderate"]
+    strong_lows = [float(r["lt2_low"]) for r in strong if r.get("lt2_low") is not None]
+    strong_highs = [float(r["lt2_high"]) for r in strong if r.get("lt2_high") is not None]
+
+    credible = [
+        r for r in with_hr
+        if r.get("hrmax_candidate") is not None
+        and r.get("hrmax_confidence") in {"high", "medium"}
+    ]
+    credible_sorted = sorted(
+        credible, key=lambda r: float(r["hrmax_candidate"]), reverse=True
+    )[:5]
+
+    comparable = [
+        r for r in ok
+        if r.get("vam_15") is not None
+        and r.get("vam_30") is not None
+        and r.get("vam_comparison")
+        and str(r["vam_comparison"]).startswith("comparable:")
+    ]
+
+    bike_names = []
+    for r in ok:
+        name = r.get("activity_gear") or "unknown"
+        if name not in bike_names:
+            bike_names.append(name)
+    bikes = []
+    for bike in bike_names:
+        all_bike_rows = [r for r in ok if (r.get("activity_gear") or "unknown") == bike]
+        bike_rows = [r for r in comparable if (r.get("activity_gear") or "unknown") == bike]
+        if not bike_rows:
+            continue
+        weights = [float(r["bike_weight"]) for r in bike_rows if r.get("bike_weight") is not None]
+        vam15 = [float(r["vam_15"]) for r in bike_rows if r.get("vam_15") is not None]
+        vam30 = [float(r["vam_30"]) for r in bike_rows if r.get("vam_30") is not None]
+        vam60 = [float(r["vam_60"]) for r in bike_rows if r.get("vam_60") is not None]
+        retention = [float(r["vam_retention_pct"]) for r in bike_rows if r.get("vam_retention_pct") is not None]
+        bikes.append({
+            "bike": bike,
+            "activities": len(all_bike_rows),
+            "median_bike_weight_kg": median(weights) if weights else None,
+            "comparable_vam_activities": len(bike_rows),
+            "vam_15_median": median(vam15) if vam15 else None,
+            "vam_15_best": max(vam15) if vam15 else None,
+            "vam_30_median": median(vam30) if vam30 else None,
+            "vam_30_best": max(vam30) if vam30 else None,
+            "vam_60_median": median(vam60) if vam60 else None,
+            "vam_60_best": max(vam60) if vam60 else None,
+            "median_retention_pct": median(retention) if retention else None,
+        })
+
+    interval_rows = [r for r in ok if r.get("interval_count")]
+    interval_sessions = [
+        {
+            "activity_date": r.get("activity_date"),
+            "activity_name": r.get("activity_name") or r.get("filename"),
+            "filename": r.get("filename"),
+            "interval_count": r.get("interval_count"),
+            "summary": r.get("interval_summary"),
+        }
+        for r in interval_rows
+    ]
+
+    retention = [
+        float(r["vam_retention_pct"])
+        for r in comparable if r.get("vam_retention_pct") is not None
+    ]
+
+    return {
+        "period": period,
+        "sport": sport,
+        "activities_processed": len(ok),
+        "activities_with_usable_hr": len(with_hr),
+        "activities_without_usable_hr": len(without_hr),
+        "activities_analysed": len(ok),
+        "errors": len(errors),
+        "activity_types": dict(Counter((r.get("activity_type") or "unknown") for r in ok)),
+        "volume": volume,
+        "lt2": {
+            "strong_observations": len(strong),
+            "moderate_observations": len(moderate),
+            "median_strong_low_bpm": median(strong_lows) if strong_lows else None,
+            "median_strong_high_bpm": median(strong_highs) if strong_highs else None,
+        },
+        "heart_rate": {
+            "top_30m_bpm": top_values(r.get("best_30m_hr") for r in with_hr),
+            "top_60m_bpm": top_values(r.get("best_60m_hr") for r in with_hr),
+            "top_90m_bpm": top_values(r.get("best_90m_hr") for r in with_hr),
+            "qualifying_2h_windows": sum(r.get("best_2h_hr") is not None for r in with_hr),
+            "top_2h_bpm": top_values(r.get("best_2h_hr") for r in with_hr),
+            "qualifying_4h_windows": sum(r.get("best_4h_hr") is not None for r in with_hr),
+            "top_4h_bpm": top_values(r.get("best_4h_hr") for r in with_hr),
+            "highest_raw_hr_bpm": top_values((r.get("raw_max_hr") for r in with_hr), n=5),
+            "credible_hrmax_candidates": [
+                {
+                    "bpm": float(r["hrmax_candidate"]),
+                    "confidence": r.get("hrmax_confidence"),
+                    "activity_date": r.get("activity_date"),
+                    "activity_name": r.get("activity_name") or r.get("filename"),
+                    "filename": r.get("filename"),
+                }
+                for r in credible_sorted
+            ],
+            "artefact_flagged_activities": sum(bool(r.get("hr_artefact")) for r in with_hr),
+        },
+        "vam": {
+            "comparable_activities": len(comparable),
+            "top_15m_m_per_h": top_values(r.get("vam_15") for r in comparable),
+            "top_30m_m_per_h": top_values(r.get("vam_30") for r in comparable),
+            "top_60m_m_per_h": top_values(r.get("vam_60") for r in comparable),
+            "median_retention_pct": median(retention) if retention else None,
+            "by_bike": bikes,
+        },
+        "hard_efforts": {
+            "activities_with_hard_blocks": sum((r.get("hard_block_count") or 0) > 0 for r in with_hr),
+            "total_hard_blocks": sum(int(r.get("hard_block_count") or 0) for r in with_hr),
+        },
+        "intervals": {
+            "detected_sessions": len(interval_rows),
+            "sessions": interval_sessions,
+        },
+    }
+
+
+def write_json_output(
+    output: Path,
+    rows: list[dict],
+    summary: dict,
+    args,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "generated_by": "training-analyser",
+        "analysis_parameters": {
+            "hrmax_bpm": args.hrmax,
+            "lt2_bpm": args.lt2,
+            "min_hr_bpm": args.min_hr,
+            "max_hr_bpm": args.max_hr,
+        },
+        "summary": summary,
+        "activities": rows,
+    }
+    with output.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
 def print_training_summary(rows: list[dict], year: int | None, month: int | None, sport: str | None, volume: dict | None = None):
     ok = [r for r in rows if r["status"] == "ok"]
+    with_hr = [r for r in ok if bool(r.get("has_hr"))]
+    without_hr = [r for r in ok if not bool(r.get("has_hr"))]
 
     print()
     if year is not None and month is not None:
@@ -625,7 +844,9 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
         print("Training summary")
     print("-" * 48)
 
-    print(f"Activities analysed:              {len(ok)}")
+    print(f"Activities processed:             {len(ok)}")
+    print(f"Activities with usable HR:        {len(with_hr)}")
+    print(f"Activities without usable HR:     {len(without_hr)}")
     print(f"Errors:                           {sum(r['status'] == 'error' for r in rows)}")
 
     if volume is not None:
@@ -648,8 +869,8 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
             + ", ".join(f"{k}={v}" for k, v in types.most_common())
         )
 
-    strong = [r for r in ok if r["lt2_evidence"] == "strong"]
-    moderate = [r for r in ok if r["lt2_evidence"] == "moderate"]
+    strong = [r for r in with_hr if r["lt2_evidence"] == "strong"]
+    moderate = [r for r in with_hr if r["lt2_evidence"] == "moderate"]
 
     print(f"Strong LT2 observations:          {len(strong)}")
     print(f"Moderate LT2 observations:        {len(moderate)}")
@@ -665,9 +886,9 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
     else:
         print("Median strong LT2 range:           insufficient evidence")
 
-    best30 = top_values(r["best_30m_hr"] for r in ok)
-    best60 = top_values(r["best_60m_hr"] for r in ok)
-    best90 = top_values(r.get("best_90m_hr") for r in ok)
+    best30 = top_values(r["best_30m_hr"] for r in with_hr)
+    best60 = top_values(r["best_60m_hr"] for r in with_hr)
+    best90 = top_values(r.get("best_90m_hr") for r in with_hr)
 
     if best30:
         print(
@@ -688,7 +909,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
     # HRmax evidence is descriptive. The supplied --hrmax remains the analysis
     # reference; users can inspect candidates and rerun with a revised value.
     credible = [
-        r for r in ok
+        r for r in with_hr
         if r.get("hrmax_candidate") is not None
         and r.get("hrmax_confidence") in {"high", "medium"}
     ]
@@ -703,15 +924,15 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
                 f"({r['hrmax_confidence']})  {r['activity_date']}"
             )
 
-    raw_top = top_values((r.get("raw_max_hr") for r in ok), n=5)
+    raw_top = top_values((r.get("raw_max_hr") for r in with_hr), n=5)
     if raw_top:
         print(
             "Highest raw HR observations:        "
             + ", ".join(f"{v:.0f}" for v in raw_top)
         )
 
-    best2h = top_values((r.get("best_2h_hr") for r in ok))
-    best4h = top_values((r.get("best_4h_hr") for r in ok))
+    best2h = top_values((r.get("best_2h_hr") for r in with_hr))
+    best4h = top_values((r.get("best_4h_hr") for r in with_hr))
     print(f"Qualifying 2h sustained windows:   {sum(r.get('best_2h_hr') is not None for r in ok)}")
     if best2h:
         print(
@@ -812,9 +1033,18 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
             detail = r.get("interval_summary") or "-"
             print(f"  {date:<18} {name}: {detail}")
 
-    artefacts = [r for r in ok if r["hr_artefact"]]
+    artefacts = [r for r in with_hr if r["hr_artefact"]]
     print()
     print(f"Activities with HR artefact flag:  {len(artefacts)}")
+
+
+def _csv_safe_training_row(row: dict) -> dict:
+    """Encode nested hard-effort evidence as JSON text in the flat CSV format."""
+    out = dict(row)
+    for key in ("hard_blocks", "hard_block_gaps"):
+        value = out.get(key)
+        out[key] = json.dumps(value, ensure_ascii=False, separators=(",", ":")) if value else ""
+    return out
 
 
 def run_training_scan(
@@ -829,10 +1059,14 @@ def run_training_scan(
     error_rows: list[dict] = []
     counts = {"ok": 0, "error": 0, "filtered": 0}
 
-    with output.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=TRAINING_CSV_FIELDS)
+    csv_handle = None
+    writer = None
+    if not args.json:
+        csv_handle = output.open("w", newline="", encoding="utf-8")
+        writer = csv.DictWriter(csv_handle, fieldnames=TRAINING_CSV_FIELDS)
         writer.writeheader()
 
+    try:
         for index, path in enumerate(files, start=1):
             summary = process_training_file(
                 path,
@@ -861,7 +1095,8 @@ def run_training_scan(
 
             row = enrich_training_row(summary.to_dict(), strava_metadata)
             rows.append(row)
-            writer.writerow(row)
+            if writer is not None:
+                writer.writerow(_csv_safe_training_row(row))
             counts["ok"] += 1
 
             label = summary.classification or summary.status
@@ -871,14 +1106,9 @@ def run_training_scan(
                 f"[{index:>4}/{len(files)}] {summary.filename} | "
                 f"{summary.status} | {label}{gear_text}"
             )
-
-    print()
-    print(f"Supported files found: {len(files)}")
-    if args.year is not None or args.sport is not None:
-        print(f"Filtered out:          {counts['filtered']}")
-    print(f"Activities analysed:   {counts['ok']}")
-    print(f"Errors:                {counts['error']}")
-    print(f"CSV written to:        {output}")
+    finally:
+        if csv_handle is not None:
+            csv_handle.close()
 
     if args.add_missing_metadata:
         if activities_csv is None:
@@ -895,6 +1125,23 @@ def run_training_scan(
             except (OSError, ValueError) as exc:
                 print(f"Error updating activities.csv: {exc}", file=sys.stderr)
                 return 2
+
+    structured_summary = build_training_summary(
+        rows + error_rows, args.year, args.month, args.sport, volume
+    )
+
+    if args.json:
+        write_json_output(output, rows, structured_summary, args)
+
+    print()
+    print(f"Supported files found: {len(files)}")
+    if args.year is not None or args.sport is not None:
+        print(f"Filtered out:          {counts['filtered']}")
+    print(f"Activities processed:  {counts['ok']}")
+    print(f"With usable HR:        {sum(bool(r.get('has_hr')) for r in rows)}")
+    print(f"Without usable HR:     {sum(not bool(r.get('has_hr')) for r in rows)}")
+    print(f"Errors:                {counts['error']}")
+    print(f"{'JSON' if args.json else 'CSV'} written to:        {output}")
 
     print_training_summary(rows + error_rows, args.year, args.month, args.sport, volume)
 

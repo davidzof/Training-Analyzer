@@ -406,6 +406,10 @@ class TrainingSummary:
     vam_comparison: str | None
     time_85pct_seconds: float | None
     time_90pct_seconds: float | None
+    hard_block_threshold_bpm: float | None
+    hard_block_count: int
+    hard_blocks: list[dict]
+    hard_block_gaps: list[dict]
     interval_count: int | None
     interval_work_total: str | None
     interval_work_median: str | None
@@ -432,6 +436,10 @@ class TrainingSummary:
     excluded_hr_samples: int
     distance_km: float | None
     elevation_gain_m: float | None
+    has_hr: bool
+    has_elevation: bool
+    has_gps: bool
+    has_power: bool
     status: str
     error: str | None = None
 
@@ -487,6 +495,37 @@ def _format_activity_date(dt) -> str | None:
     return dt.strftime("%d %b %Y %H:%M")
 
 
+def _serialize_hard_blocks(result) -> list[dict]:
+    """Return all detected hard-HR blocks, independent of interval classification."""
+    return [
+        {
+            "start": b.start.strftime("%H:%M:%S"),
+            "end": b.end.strftime("%H:%M:%S"),
+            "duration_seconds": round(b.duration_s, 1),
+            "average_hr_bpm": round(b.avg_hr, 1),
+            "max_hr_bpm": int(b.max_hr),
+        }
+        for b in result.blocks
+    ]
+
+
+def _serialize_hard_block_gaps(result) -> list[dict]:
+    """Return terrain/recovery gaps between consecutive detected hard-HR blocks."""
+    return [
+        {
+            "start": g.start.strftime("%H:%M:%S"),
+            "end": g.end.strftime("%H:%M:%S"),
+            "duration_seconds": round(g.duration_s, 1),
+            "distance_km": round(g.distance_m / 1000.0, 3),
+            "elevation_change_m": round(g.elev_gain_m, 1) if g.elev_gain_m is not None else None,
+            "average_hr_bpm": round(g.avg_hr, 1) if g.avg_hr is not None else None,
+            "stopped_fraction": round(g.stopped_fraction, 3),
+            "kind": g.kind,
+        }
+        for g in result.gaps
+    ]
+
+
 def process_training_file(
     path: Path,
     hrmax: int,
@@ -497,7 +536,7 @@ def process_training_file(
     """
     Run V7's richer analysis on one activity.
 
-    analyze_training_v9.py must be in the same directory or on PYTHONPATH.
+    analyze_training.py must be in the same directory or on PYTHONPATH.
     """
     try:
         from analyze_training import analyze_activity
@@ -513,7 +552,8 @@ def process_training_file(
             best_4h_hr_p90=None,
             vam_15=None, vam_30=None, vam_60=None, vam_retention_pct=None,
             vam_comparison=None, time_85pct_seconds=None,
-            time_90pct_seconds=None, interval_count=None, interval_work_total=None,
+            time_90pct_seconds=None, hard_block_threshold_bpm=None, hard_block_count=0,
+            hard_blocks=[], hard_block_gaps=[], interval_count=None, interval_work_total=None,
             interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
             interval_work_durations=None, interval_work_avg_hrs=None, interval_work_max_hrs=None,
@@ -521,9 +561,10 @@ def process_training_file(
             overall_ride=None, key_effort=None,
             classification=None, confidence=None, lt2_low=None, lt2_high=None,
             lt2_evidence=None, lt2_reason=None, lt2_clue=None,
-            hr_artefact=False, excluded_hr_samples=0, distance_km=None, elevation_gain_m=None, status="error",
+            hr_artefact=False, excluded_hr_samples=0, distance_km=None, elevation_gain_m=None,
+            has_hr=False, has_elevation=False, has_gps=False, has_power=False, status="error",
             error=(
-                "Could not import analyze_trainin.py. Put it in the same "
+                "Could not import analyze_training.py. Put it in the same "
                 "directory as activity_file_processor.py or on PYTHONPATH. "
                 f"Original error: {exc}"
             ),
@@ -541,7 +582,7 @@ def process_training_file(
             activity_date=_format_activity_date(result.start_time),
             activity_type=normalise_activity_type(result.activity_type),
             duration=_format_duration_hms(result.duration_s),
-            average_hr=round(result.average_hr, 1),
+            average_hr=round(result.average_hr, 1) if result.average_hr is not None else None,
             raw_max_hr=result.raw_max_hr,
             analysed_max_hr=result.analysed_max_hr,
             hrmax_10s=round(result.hrmax_10s, 1) if result.hrmax_10s is not None else None,
@@ -567,8 +608,12 @@ def process_training_file(
             vam_retention_pct=round(result.vam_retention_pct, 1)
                 if result.vam_retention_pct is not None else None,
             vam_comparison=result.vam_comparison_text,
-            time_85pct_seconds=round(result.time85_s, 1),
-            time_90pct_seconds=round(result.time90_s, 1),
+            time_85pct_seconds=round(result.time85_s, 1) if result.time85_s is not None else None,
+            time_90pct_seconds=round(result.time90_s, 1) if result.time90_s is not None else None,
+            hard_block_threshold_bpm=round(result.detection_threshold, 1) if result.detection_threshold is not None else None,
+            hard_block_count=len(result.blocks),
+            hard_blocks=_serialize_hard_blocks(result),
+            hard_block_gaps=_serialize_hard_block_gaps(result),
             interval_count=result.interval_summary.count if result.interval_summary is not None else None,
             interval_work_total=_format_duration_hms(result.interval_summary.work_total_s) if result.interval_summary is not None else None,
             interval_work_median=_format_duration_hms(result.interval_summary.work_median_s) if result.interval_summary is not None else None,
@@ -595,6 +640,10 @@ def process_training_file(
             excluded_hr_samples=result.excluded_hr_samples,
             distance_km=round(result.distance_m/1000.0, 2),
             elevation_gain_m=round(result.elevation_gain_m, 0) if result.elevation_gain_m is not None else None,
+            has_hr=result.has_hr,
+            has_elevation=result.has_elevation,
+            has_gps=result.has_gps,
+            has_power=result.has_power,
             status="ok",
         )
     except Exception as exc:
@@ -609,7 +658,8 @@ def process_training_file(
             best_4h_hr_p90=None,
             vam_15=None, vam_30=None, vam_60=None, vam_retention_pct=None,
             vam_comparison=None, time_85pct_seconds=None,
-            time_90pct_seconds=None, interval_count=None, interval_work_total=None,
+            time_90pct_seconds=None, hard_block_threshold_bpm=None, hard_block_count=0,
+            hard_blocks=[], hard_block_gaps=[], interval_count=None, interval_work_total=None,
             interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
             interval_work_durations=None, interval_work_avg_hrs=None, interval_work_max_hrs=None,
@@ -618,5 +668,6 @@ def process_training_file(
             classification=None, confidence=None, lt2_low=None, lt2_high=None,
             lt2_evidence=None, lt2_reason=None, lt2_clue=None,
             hr_artefact=False, excluded_hr_samples=0, distance_km=None, elevation_gain_m=None,
+            has_hr=False, has_elevation=False, has_gps=False, has_power=False,
             status="error", error=str(exc),
         )

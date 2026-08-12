@@ -44,9 +44,9 @@ python3 -m pip install fitparse
 Put these three Python files in the same directory:
 
 ```text
-scan_strava_v12.py
-activity_file_processor_v10.py
-analyze_training_v10.py
+scan_strava.py
+activity_file_processor.py
+analyze_training.py
 ```
 
 ## 2. Supported activity files
@@ -153,7 +153,7 @@ means that 174 metadata rows matched the year/sport filter, but six referenced a
 The main command is:
 
 ```bash
-python3 scan_strava_v12.py DIRECTORY --hrmax HRMAX
+python3 scan_strava.py DIRECTORY --hrmax HRMAX
 ```
 
 `--hrmax` is mandatory.
@@ -161,19 +161,19 @@ python3 scan_strava_v12.py DIRECTORY --hrmax HRMAX
 Example:
 
 ```bash
-python3 scan_strava_v12.py /home/user/Strava/activities --hrmax 184
+python3 scan_strava.py /home/user/Strava/activities --hrmax 184
 ```
 
 A typical yearly cycling scan is:
 
 ```bash
-python3 scan_strava_v12.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --output cycling_2025.csv
+python3 scan_strava.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --output cycling_2025.csv
 ```
 
 With an explicit metadata file:
 
 ```bash
-python3 scan_strava_v12.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --output cycling_2025.csv --activities-csv /home/user/Strava/activities.csv
+python3 scan_strava.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --output cycling_2025.csv --activities-csv /home/user/Strava/activities.csv
 ```
 
 ---
@@ -189,7 +189,7 @@ Directory containing GPX, TCX or FIT activity files.
 Example:
 
 ```bash
-python3 scan_strava_v12.py ../../Documents/Strava/activities ...
+python3 scan_strava.py ../../Documents/Strava/activities ...
 ```
 
 ---
@@ -346,9 +346,33 @@ If omitted, the scanner looks in the parent directory of the activity folder.
 
 ---
 
+### `--json`
+
+Write structured JSON instead of CSV. The JSON contains the season/year summary together with the per-activity records, making it suitable for LLM or agent analysis.
+
+Example:
+
+```bash
+python3 scan_strava.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --json
+```
+
+This produces:
+
+```text
+2025-cycling.json
+```
+
+For a May-start cross-country skiing season:
+
+```text
+may-2025-cross-country-skiing.json
+```
+
+---
+
 ### `--output`
 
-Output CSV path.
+Optional output path. Normally the scanner generates the filename automatically.
 
 Example:
 
@@ -356,23 +380,14 @@ Example:
 --output cycling_2015.csv
 ```
 
-Defaults:
+Default names are generated from the period and sport. Examples:
 
 ```text
-training_<year>.csv
+2025-cycling.csv
+may-2025-cross-country-skiing.csv
 ```
 
-for a calendar-year scan, or:
-
-```text
-training_<year>-<month>.csv
-```
-
-for a rolling 12-month season, otherwise:
-
-```text
-strava_training_summary.csv
-```
+Use `--output` only when you want to override the generated name.
 
 ---
 
@@ -401,13 +416,13 @@ This is particularly useful for sports such as cross-country skiing whose traini
 Example:
 
 ```bash
-python3 scan_strava_v13.py /home/user/Strava/activities --hrmax 184 --year 2025 --month 5 --sport skiing --output skiing_2025-26.csv
+python3 scan_strava.py /home/user/Strava/activities --hrmax 184 --year 2025 --month 5 --sport skiing --output skiing_2025-26.csv
 ```
 
-If `--output` is omitted, a season beginning in May 2025 defaults to:
+If `--output` is omitted, a skiing season beginning in May 2025 defaults to:
 
 ```text
-training_2025-05.csv
+may-2025-cross-country-skiing.csv
 ```
 
 `--month` requires `--year`.
@@ -431,7 +446,7 @@ to append successfully analysed missing files to `activities.csv`.
 Example:
 
 ```bash
-python3 scan_strava_v13.py /home/user/Strava/activities --hrmax 184 --year 2026 --sport cycling --activities-csv /home/user/Strava/activities.csv --add-missing-metadata --output cycling_2026.csv
+python3 scan_strava.py /home/user/Strava/activities --hrmax 184 --year 2026 --sport cycling --activities-csv /home/user/Strava/activities.csv --add-missing-metadata --output cycling_2026.csv
 ```
 
 When this option is enabled, the scanner does **not** rely solely on `activities.csv` for preselection. It scans the activity directory so newly added files can be discovered.
@@ -468,7 +483,7 @@ After appending rows, the scanner reloads `activities.csv`, so the current run's
 ## 6. Full yearly example
 
 ```bash
-python3 scan_strava_v12.py ../../Documents/Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv ../../Documents/Strava/activities.csv
+python3 scan_strava.py ../../Documents/Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv ../../Documents/Strava/activities.csv
 ```
 
 Typical output begins with:
@@ -1263,19 +1278,19 @@ When gear data exists it also shows comparable VAM grouped by bike.
 For detailed analysis of one activity:
 
 ```bash
-python3 analyze_training_v10.py ride.gpx --hrmax 184
+python3 analyze_training.py ride.gpx --hrmax 184
 ```
 
 FIT example:
 
 ```bash
-python3 analyze_training_v10.py ride.fit.gz --hrmax 184
+python3 analyze_training.py ride.fit.gz --hrmax 184
 ```
 
 With a known LT2:
 
 ```bash
-python3 analyze_training_v10.py ride.gpx --hrmax 184 --lt2 162
+python3 analyze_training.py ride.gpx --hrmax 184 --lt2 162
 ```
 
 The one-off analyser prints more detail than the batch scanner, including:
@@ -1300,7 +1315,7 @@ The one-off analyser prints more detail than the batch scanner, including:
 Example:
 
 ```bash
-python3 scan_strava_v12.py /data/Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv /data/Strava/activities.csv
+python3 scan_strava.py /data/Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv /data/Strava/activities.csv
 ```
 
 Repeat for each year.
@@ -1523,9 +1538,9 @@ The analysis deliberately follows a few conservative rules:
 
 ```text
 analysis/
-├── scan_strava_v12.py
-├── activity_file_processor_v10.py
-├── analyze_training_v10.py
+├── scan_strava.py
+├── activity_file_processor.py
+├── analyze_training.py
 ├── cycling_2015.csv
 ├── cycling_2016.csv
 └── ...
@@ -1541,7 +1556,7 @@ Strava/
 Example command from `analysis/`:
 
 ```bash
-python3 scan_strava_v12.py ../Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv ../Strava/activities.csv
+python3 scan_strava.py ../Strava/activities --hrmax 192 --year 2015 --sport cycling --output cycling_2015.csv --activities-csv ../Strava/activities.csv
 ```
 
 ---
