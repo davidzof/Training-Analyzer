@@ -9,12 +9,16 @@ actual humans like coaches.
 It offers the following features
 
 - heart-rate analysis across multiple durations;
-- per-ride and per season HRmax evidence;
-- LT2 estimation;
+- per-ride and per-season HRmax evidence;
+- cautious LT2 estimation;
 - long-duration sustained heart-rate observations;
+- hard-effort block detection, including recovery gaps;
 - climbing performance using VAM;
+- analysis of activities even when no usable HR trace is present;
+- capability flags for HR, elevation, GPS and future power data;
 - annual cycling volume, distance and elevation;
 - bike/gear context from Strava's `activities.csv`;
+- structured CSV or JSON output for longitudinal analysis by humans or LLMs;
 - historical comparison across many years.
 
 The current versions are:
@@ -99,6 +103,31 @@ When available, `activities.csv` is used for:
 - counts of long rides.
 
 It also allows annual volume to include rides where no usable HR trace exists.
+
+### Capability-based activity processing
+
+Heart rate is **not** a prerequisite for an activity to be analysed. The scanner keeps an activity whenever the source file contains enough timestamped samples to reconstruct useful evidence.
+
+Each activity reports availability flags:
+
+```text
+has_hr
+has_elevation
+has_gps
+has_power
+```
+
+The current analyser uses HR, GPS and elevation where available. `has_power` is currently a placeholder for future recorded-power support.
+
+A ride without usable HR can still contribute:
+
+- distance;
+- elevation gain;
+- VAM, when elevation data is suitable;
+- bike/gear statistics;
+- yearly/seasonal volume.
+
+HR-dependent fields remain `null` in JSON or empty in CSV. This avoids the historical selection bias of analysing climbing performance only on rides where a heart-rate monitor happened to be worn.
 
 ### Automatic lookup
 
@@ -361,6 +390,8 @@ This produces:
 ```text
 2025-cycling.json
 ```
+
+The JSON is designed for longitudinal analysis. It contains a compact top-level season summary plus the individual activity records used to support it. Missing observations use JSON `null`; unavailable capabilities are represented explicitly by the `has_*` flags. Hard-effort blocks and their gaps remain nested arrays rather than being flattened into strings.
 
 For a May-start cross-country skiing season:
 
@@ -755,11 +786,61 @@ Mountain rides naturally contain climbs, descents and easier sections, so a wide
 ---
 
 
-## Interval session detail
+## Hard-effort blocks and interval session detail
 
-When an activity is classified as an interval session, the CSV now preserves the HR-detected work/recovery structure instead of only writing a generic label such as `supra-threshold intervals`.
+The analyser keeps two related but deliberately separate concepts:
 
-Fields are:
+1. **hard HR blocks** — sustained hard efforts detected in the HR trace;
+2. **structured interval sessions** — a stricter interpretation requiring a convincing repeated work/recovery pattern.
+
+This distinction matters for outdoor training. A hilly ride may contain several genuine hard climbs without resembling a conventional `4 x 8 min` interval workout. The hard efforts are still useful evidence and are therefore exported even when the activity does not qualify as an interval session.
+
+Every HR-enabled activity now includes:
+
+```text
+hard_block_threshold_bpm
+hard_block_count
+hard_blocks
+hard_block_gaps
+```
+
+Each hard block records:
+
+```text
+start
+end
+duration_seconds
+average_hr_bpm
+max_hr_bpm
+```
+
+When two hard blocks are separated, the gap can record:
+
+```text
+start
+end
+duration_seconds
+distance_km
+elevation_change_m
+average_hr_bpm
+stopped_fraction
+kind
+```
+
+Possible gap descriptions include terrain-aware labels such as `descent / terrain recovery`, `easing on climb` and `active recovery on climb`.
+
+In JSON, `hard_blocks` and `hard_block_gaps` are proper nested arrays. In CSV they are stored as compact JSON text in the corresponding cells.
+
+A ride can therefore legitimately contain:
+
+```text
+hard_block_count: 4
+interval_count:    null
+```
+
+This means four sustained hard efforts were detected, but the ride did not meet the stricter definition of a structured interval session.
+
+When a genuine interval session is detected, the existing interval summary fields are also populated:
 
 ```text
 interval_count
@@ -777,21 +858,7 @@ interval_recovery_avg_hrs
 interval_summary
 ```
 
-The list fields use `|` as a separator. Example:
-
-```text
-interval_count:               4
-interval_work_durations:      0:07:44|0:07:48|0:07:51|0:07:50
-interval_work_avg_hrs:        165.4|167.3|168.2|169.1
-interval_work_max_hrs:        166|168|169|170
-interval_recovery_durations:  0:04:14|0:04:10|0:04:08
-interval_recovery_avg_hrs:    135.1|136.8|137.7
-interval_summary:             4 detected hard-HR blocks; median 0:07:49 @ 167.5 bpm; median recovery 0:04:10 @ 136.5 bpm
-```
-
-These are **HR-detected hard blocks**, not exact prescribed or lap durations. Heart rate rises and falls with a delay after workload changes, so a real 8-minute interval may appear as roughly 7 minutes 30 seconds to 8 minutes of HR above the detection threshold. This is intentional: the software reports what the HR trace supports rather than inventing exact workout timing.
-
-Interval detail is only populated when the existing classifier identifies a genuine interval session (normally at least three separate hard groups with active recoveries). Sustained climbs interrupted by traffic, photos or short easing are still treated separately.
+These remain **HR-detected** work/recovery periods rather than exact prescribed or lap durations. Heart rate rises and falls with a delay after workload changes, so a real 8-minute interval may appear as somewhat less than eight minutes above the detection threshold. The software reports what the HR trace supports rather than inventing exact workout timing.
 
 ---
 
@@ -1146,11 +1213,15 @@ vam_comparison
 
 ---
 
-## 37. Intensity and classification
+## 37. Intensity, hard efforts and classification
 
 ```text
 time_85pct_seconds
 time_90pct_seconds
+hard_block_threshold_bpm
+hard_block_count
+hard_blocks
+hard_block_gaps
 overall_ride
 key_effort
 classification
@@ -1173,14 +1244,20 @@ lt2_clue
 
 ---
 
-## 39. Artefact and status
+## 39. Availability, artefact and status
 
 ```text
 hr_artefact
 excluded_hr_samples
+has_hr
+has_elevation
+has_gps
+has_power
 status
 error
 ```
+
+`status: ok` does not imply that HR is present. A valid no-HR ride can have `has_hr: false` while retaining GPS/elevation/VAM evidence.
 
 ---
 
@@ -1255,7 +1332,22 @@ raw sensor maxima
 
 ---
 
-## 44. VAM section
+## 44. Hard-effort section
+
+The JSON season summary contains:
+
+```text
+activities_with_hard_blocks
+total_hard_blocks
+```
+
+This prevents a year containing hard climbing or other embedded quality work from looking like an entirely easy/endurance year merely because none of the rides met the stricter interval-session definition.
+
+The separate interval summary still reports only structured sessions.
+
+---
+
+## 45. VAM section
 
 The scanner reports:
 
@@ -1273,7 +1365,7 @@ When gear data exists it also shows comparable VAM grouped by bike.
 
 # One-off activity analysis
 
-## 45. Running the analyser directly
+## 46. Running the analyser directly
 
 For detailed analysis of one activity:
 
@@ -1293,6 +1385,20 @@ With a known LT2:
 python3 analyze_training.py ride.gpx --hrmax 184 --lt2 162
 ```
 
+After a successful one-off analysis, the analyser looks for `activities.csv` in the parent of the activity directory and appends a minimal reconstructed metadata row when the file is missing from the CSV. It does not overwrite an existing row and creates a one-time `.bak` backup before the first append.
+
+Use an explicit metadata file with:
+
+```bash
+python3 analyze_training.py ride.gpx --hrmax 184 --activities-csv /path/to/activities.csv
+```
+
+Or analyse without changing metadata:
+
+```bash
+python3 analyze_training.py ride.gpx --hrmax 184 --no-update-metadata
+```
+
 The one-off analyser prints more detail than the batch scanner, including:
 
 - terrain context;
@@ -1310,7 +1416,7 @@ The one-off analyser prints more detail than the batch scanner, including:
 
 # Suggested historical workflow
 
-## 46. Analyse one year at a time
+## 47. Analyse one year at a time
 
 Example:
 
@@ -1322,7 +1428,7 @@ Repeat for each year.
 
 ---
 
-## 47. Choose HRmax sensibly
+## 48. Choose HRmax sensibly
 
 Start with a reasonable annual estimate.
 
@@ -1342,7 +1448,7 @@ If the evidence suggests the estimate is wrong, rerun the year with a revised `-
 
 ---
 
-## 48. Interpret LT2 across several rides
+## 49. Interpret LT2 across several rides
 
 Prefer:
 
@@ -1360,7 +1466,7 @@ Avoid using:
 
 ---
 
-## 49. Use 4h HR as a long-duration clue, not an automatic LT1 label
+## 50. Use 4h HR as a long-duration clue, not an automatic LT1 label
 
 The program deliberately reports:
 
@@ -1380,7 +1486,7 @@ However, terrain, heat, fatigue, descending and pacing all influence the result.
 
 ---
 
-## 50. Use annual volume to explain performance
+## 51. Use annual volume to explain performance
 
 When comparing years, do not interpret VAM or threshold changes without considering:
 
@@ -1400,7 +1506,7 @@ Short-term changes in training opportunity can be much larger than normal age-re
 
 # Troubleshooting
 
-## 51. `FIT support requires fitparse`
+## 52. `FIT support requires fitparse`
 
 Install:
 
@@ -1410,7 +1516,7 @@ python3 -m pip install fitparse
 
 ---
 
-## 52. `activities.csv not found`
+## 53. `activities.csv not found`
 
 Either specify it explicitly:
 
@@ -1424,7 +1530,7 @@ The analysis still works without metadata if you simply omit `--activities-csv`,
 
 ---
 
-## 53. `CSV rows missing file`
+## 54. `CSV rows missing file`
 
 The metadata row exists, but the corresponding GPX/FIT/TCX file is not present in the supplied activity directory.
 
@@ -1432,22 +1538,21 @@ Check the directory you passed as the positional argument.
 
 ---
 
-## 54. `Not enough valid HR samples`
+## 55. No usable heart rate
 
-The file contains too little usable HR after applying:
+Missing or unusable HR is no longer a file-level error.
+
+If the activity still has enough timestamped samples, it is retained with:
 
 ```text
---min-hr
---max-hr
+has_hr: false
 ```
 
-and artefact exclusion.
-
-This is expected for activities recorded without an HR sensor.
+HR-dependent metrics remain empty/`null`, while GPS/elevation/VAM, distance and metadata can still be analysed where available. A true processing error is reserved for a file that cannot provide enough usable activity data at all.
 
 ---
 
-## 55. XML `unbound prefix`
+## 56. XML `unbound prefix`
 
 Some old GPX files contain malformed XML namespace prefixes.
 
@@ -1463,7 +1568,7 @@ The file may need to be repaired or converted before it can be read.
 
 ---
 
-## 56. Lots of raw HR values over plausible HRmax
+## 57. Lots of raw HR values over plausible HRmax
 
 Do not raise `--hrmax` merely because old files contain values such as:
 
@@ -1479,7 +1584,7 @@ Old chest straps can produce convincing but false high-HR episodes.
 
 ---
 
-## 57. A 4-hour ride has no `best_4h_hr`
+## 58. A 4-hour ride has no `best_4h_hr`
 
 Possible reasons include:
 
@@ -1492,7 +1597,7 @@ P10–P90 spread is **not** a rejection criterion.
 
 ---
 
-## 58. VAM looks unexpectedly low
+## 59. VAM looks unexpectedly low
 
 Check:
 
@@ -1515,21 +1620,27 @@ The analysis deliberately follows a few conservative rules:
 1. **Observed data before labels.**  
    Report 2h/4h sustained HR rather than automatically declaring LT1.
 
-2. **Sustained evidence before maxima.**  
+2. **Capabilities rather than prerequisites.**  
+   Missing HR does not discard GPS, elevation, VAM or volume evidence.
+
+3. **Hard efforts are not automatically interval sessions.**  
+   Preserve detected hard blocks even when the ride fails the stricter structured-interval test.
+
+4. **Sustained evidence before maxima.**  
    HRmax confidence uses 10s/30s/60s support rather than a one-second spike.
 
-3. **60-minute evidence before numerical LT2.**  
+5. **60-minute evidence before numerical LT2.**  
    A hard 30-minute effort alone only provides a clue.
 
-4. **Intervals are not direct LT2 tests.**
+6. **Intervals are not direct LT2 tests.**
 
-5. **Raw VAM stays raw.**  
+7. **Raw VAM stays raw.**  
    Bike metadata provides context instead of creating an artificial normalization formula.
 
-6. **Historical sensor data is noisy.**  
+8. **Historical sensor data is noisy.**  
    Repeated patterns matter more than isolated extremes.
 
-7. **Training context matters.**  
+9. **Training context matters.**  
    Annual volume, injury, lifestyle and bike use can explain large performance changes independently of ageing.
 
 ---
@@ -1575,14 +1686,18 @@ Values such as HRmax, LT2 and long-duration HR should be interpreted as estimate
 ```text
 Supported files found: 212
 Filtered out:          0
-Activities analysed:   55
-Errors:                157
+Activities processed: 210
+With usable HR:       55
+Without usable HR:    155
+Errors:                1
 CSV written to:        cycling_2022.csv
 
 Season summary: 2022 / cycling
 ------------------------------------------------
-Activities analysed:              55
-Errors:                           157
+Activities processed:             210
+With usable HR:                   55
+Without usable HR:                155
+Errors:                           1
 Activities in Strava metadata:    212
 Total moving time:                170.6 h
 Total distance:                   3404 km
@@ -1605,11 +1720,13 @@ Qualifying 2h sustained windows:   12
 Top 2h sustained HR observations:   164.2, 160.3, 157.4
 Qualifying 4h sustained windows:   2
 Top 4h sustained HR observations:   144.8, 143.6
-Comparable VAM activities:         11
-Top comparable 15m VAM:            909, 888, 875 m/h
+Comparable VAM activities:         12
+Top comparable 15m VAM:            946, 909, 888 m/h
 Top comparable 30m VAM:            872, 846, 843 m/h
 Top comparable 60m VAM:            801, 738, 725 m/h
-Median comparable VAM retention:   93.3%
+Median comparable VAM retention:   93.2%
+Activities with hard blocks:        (depends on selected period)
+Total hard blocks:                  (depends on selected period)
 
 VAM by bike (comparable activities)
 ------------------------------------------------
