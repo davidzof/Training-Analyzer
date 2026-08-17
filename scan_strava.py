@@ -19,7 +19,7 @@ import argparse
 import csv
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import Counter
 from pathlib import Path
 from statistics import median
@@ -67,6 +67,20 @@ TRAINING_CSV_FIELDS = [
     "vam_comparison",
     "time_85pct_seconds",
     "time_90pct_seconds",
+    "zone1_seconds",
+    "zone2_seconds",
+    "zone3_seconds",
+    "zone_total_seconds",
+    "active_zone1_seconds",
+    "active_zone2_seconds",
+    "active_zone3_seconds",
+    "active_zone_total_seconds",
+    "active_zone1_pct",
+    "active_zone2_pct",
+    "active_zone3_pct",
+    "zone1_pct",
+    "zone2_pct",
+    "zone3_pct",
     "hard_block_threshold_bpm",
     "hard_block_count",
     "hard_blocks",
@@ -137,6 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Yearly HRmax reference used by the training analysis, e.g. --hrmax 184",
     )
     parser.add_argument(
+        "--lt1",
+        type=float,
+        default=None,
+        help=(
+            "Optional known LT1 HR for per-ride and weekly 3-zone time-in-zone "
+            "reporting. Zone reporting requires both --lt1 and --lt2."
+        ),
+    )
+    parser.add_argument(
         "--lt2",
         type=float,
         default=None,
@@ -172,8 +195,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Optional normalized activity type filter, e.g. cycling, running, "
-            "skiing, walking."
+            "Optional comma-separated normalized activity type filter, e.g. "
+            "cycling,skiing,walking. The skiing alias includes Nordic and "
+            "backcountry skiing, but not alpine skiing."
         ),
     )
     parser.add_argument(
@@ -304,11 +328,8 @@ def passes_filters(summary, year: int | None, month: int | None, sport: str | No
     if not date_in_window(summary.activity_date, year, month):
         return False
 
-    if sport is not None:
-        actual = normalize_strava_sport(summary.activity_type)
-        requested = normalize_strava_sport(sport)
-        if actual != requested:
-            return False
+    if not sport_matches(summary.activity_type, sport):
+        return False
 
     return True
 
@@ -425,6 +446,27 @@ def normalize_strava_sport(value: str | None) -> str | None:
     return mapping.get(key, value.strip().lower())
 
 
+def parse_sport_filter(value: str | None) -> set[str] | None:
+    """Return normalized sports requested by a comma-separated --sport value."""
+    if not value:
+        return None
+    sports = {
+        normalized
+        for part in value.split(",")
+        if part.strip()
+        for normalized in [normalize_strava_sport(part)]
+        if normalized is not None
+    }
+    return sports or None
+
+
+def sport_matches(actual_value: str | None, requested_value: str | None) -> bool:
+    requested = parse_sport_filter(requested_value)
+    if requested is None:
+        return True
+    return normalize_strava_sport(actual_value) in requested
+
+
 def preselect_files_from_metadata(
     directory: Path,
     metadata: dict[str, dict],
@@ -439,15 +481,15 @@ def preselect_files_from_metadata(
     selected: list[Path] = []
     missing = 0
     matched_rows = 0
-    requested_sport = normalize_strava_sport(sport) if sport else None
+    requested_sports = parse_sport_filter(sport)
 
     for filename, info in metadata.items():
         if not date_in_window(info.get("strava_activity_date"), year, month):
             continue
 
-        if requested_sport is not None:
+        if requested_sports is not None:
             actual = normalize_strava_sport(info.get("strava_activity_type"))
-            if actual != requested_sport:
+            if actual not in requested_sports:
                 continue
 
         matched_rows += 1
@@ -607,10 +649,8 @@ def fmt_number(value, digits=1):
 def _metadata_matches(info: dict, year: int | None, month: int | None, sport: str | None) -> bool:
     if not date_in_window(info.get("strava_activity_date"), year, month):
         return False
-    if sport is not None:
-        actual = normalize_strava_sport(info.get("strava_activity_type"))
-        if actual != normalize_strava_sport(sport):
-            return False
+    if not sport_matches(info.get("strava_activity_type"), sport):
+        return False
     return True
 
 
@@ -647,7 +687,159 @@ def _duration_seconds_hms(value: str | None) -> float | None:
         return None
 
 
-def build_training_summary(rows: list[dict], year: int | None, month: int | None, sport: str | None, volume: dict | None = None) -> dict:
+def build_weekly_summary(
+    rows: list[dict],
+    metadata: dict[str, dict],
+    year: int | None,
+    month: int | None,
+    sport: str | None,
+) -> list[dict]:
+    """Aggregate transparent weekly training volume and 3-zone HR time.
+
+    Volume comes from Strava metadata where available, so activities without HR
+    still count. Zone and hard-effort data are joined from analysed activities.
+    Empty weeks between the first and last activity are retained so training
+    gaps are visible. The 4-week figure is the sum of the current and previous
+    three calendar weeks.
+    """
+    row_by_file = {
+        normalize_export_filename(r.get("filename")): r
+        for r in rows
+        if r.get("status") == "ok" and normalize_export_filename(r.get("filename"))
+    }
+    entries = []
+    seen = set()
+    if metadata:
+        for filename, info in metadata.items():
+            if not _metadata_matches(info, year, month, sport):
+                continue
+            dt = parse_activity_datetime(info.get("strava_activity_date"))
+            if dt is None:
+                continue
+            key = normalize_export_filename(filename) or filename
+            seen.add(key)
+            entries.append((key, dt, info, row_by_file.get(key)))
+
+    # Fall back to analysed rows for activities absent from activities.csv.
+    for key, row in row_by_file.items():
+        if key in seen:
+            continue
+        if not date_in_window(row.get("activity_date"), year, month):
+            continue
+        if not sport_matches(row.get("activity_type"), sport):
+            continue
+        dt = parse_activity_datetime(row.get("activity_date"))
+        if dt is None:
+            continue
+        entries.append((key, dt, {}, row))
+
+    if not entries:
+        return []
+
+    buckets: dict[datetime, dict] = {}
+    for key, dt, info, row in entries:
+        week = (dt - timedelta(days=dt.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        b = buckets.setdefault(week, {
+            "activities": 0,
+            "moving_seconds": 0.0,
+            "distance_m": 0.0,
+            "elevation_gain_m": 0.0,
+            "rides_3h": 0,
+            "zone1_seconds": 0.0,
+            "zone2_seconds": 0.0,
+            "zone3_seconds": 0.0,
+            "zone_total_seconds": 0.0,
+            "active_zone1_seconds": 0.0,
+            "active_zone2_seconds": 0.0,
+            "active_zone3_seconds": 0.0,
+            "active_zone_total_seconds": 0.0,
+            "activities_with_zone_data": 0,
+            "activities_with_active_zone_data": 0,
+            "hard_blocks": 0,
+            "activities_with_hard_blocks": 0,
+        })
+        b["activities"] += 1
+        moving = info.get("moving_time_s")
+        elapsed = info.get("elapsed_time_s")
+        if moving is None and row is not None:
+            moving = _duration_seconds_hms(row.get("duration"))
+        duration_s = float(moving if moving is not None else (elapsed or 0.0))
+        b["moving_seconds"] += max(0.0, duration_s)
+        if duration_s >= 3*3600:
+            b["rides_3h"] += 1
+        if info.get("distance_m_meta") is not None:
+            b["distance_m"] += float(info["distance_m_meta"])
+        elif row is not None and row.get("distance_km") is not None:
+            b["distance_m"] += float(row["distance_km"])*1000.0
+        if info.get("elevation_gain_m_meta") is not None:
+            b["elevation_gain_m"] += float(info["elevation_gain_m_meta"])
+        elif row is not None and row.get("elevation_gain_m") is not None:
+            b["elevation_gain_m"] += float(row["elevation_gain_m"])
+
+        if row is not None and row.get("zone_total_seconds") is not None:
+            b["activities_with_zone_data"] += 1
+            for field in ("zone1_seconds", "zone2_seconds", "zone3_seconds", "zone_total_seconds"):
+                b[field] += float(row.get(field) or 0.0)
+        if row is not None and row.get("active_zone_total_seconds") is not None:
+            b["activities_with_active_zone_data"] += 1
+            for field in ("active_zone1_seconds", "active_zone2_seconds", "active_zone3_seconds", "active_zone_total_seconds"):
+                b[field] += float(row.get(field) or 0.0)
+        if row is not None:
+            blocks = int(row.get("hard_block_count") or 0)
+            b["hard_blocks"] += blocks
+            if blocks:
+                b["activities_with_hard_blocks"] += 1
+
+    first_week = min(buckets)
+    last_week = max(buckets)
+    weeks = []
+    cursor = first_week
+    while cursor <= last_week:
+        b = buckets.get(cursor, {
+            "activities": 0, "moving_seconds": 0.0, "distance_m": 0.0,
+            "elevation_gain_m": 0.0, "rides_3h": 0, "zone1_seconds": 0.0,
+            "zone2_seconds": 0.0, "zone3_seconds": 0.0, "zone_total_seconds": 0.0,
+            "active_zone1_seconds": 0.0, "active_zone2_seconds": 0.0,
+            "active_zone3_seconds": 0.0, "active_zone_total_seconds": 0.0,
+            "activities_with_zone_data": 0, "activities_with_active_zone_data": 0, "hard_blocks": 0,
+            "activities_with_hard_blocks": 0,
+        })
+        recorded_ztotal = b["zone_total_seconds"]
+        active_ztotal = b["active_zone_total_seconds"]
+        iso = cursor.isocalendar()
+        weeks.append({
+            "week_start": cursor.date().isoformat(),
+            "iso_year": iso.year,
+            "iso_week": iso.week,
+            "activities": b["activities"],
+            "moving_hours": round(b["moving_seconds"]/3600.0, 2),
+            "distance_km": round(b["distance_m"]/1000.0, 1),
+            "elevation_gain_m": round(b["elevation_gain_m"], 0),
+            "rides_3h": b["rides_3h"],
+            "activities_with_zone_data": b["activities_with_zone_data"],
+            "activities_with_active_zone_data": b["activities_with_active_zone_data"],
+            "zone1_hours": round(b["active_zone1_seconds"]/3600.0, 2) if active_ztotal else None,
+            "zone2_hours": round(b["active_zone2_seconds"]/3600.0, 2) if active_ztotal else None,
+            "zone3_hours": round(b["active_zone3_seconds"]/3600.0, 2) if active_ztotal else None,
+            "hr_zone_hours": round(active_ztotal/3600.0, 2) if active_ztotal else None,
+            "zone1_pct": round(100*b["active_zone1_seconds"]/active_ztotal, 1) if active_ztotal else None,
+            "zone2_pct": round(100*b["active_zone2_seconds"]/active_ztotal, 1) if active_ztotal else None,
+            "zone3_pct": round(100*b["active_zone3_seconds"]/active_ztotal, 1) if active_ztotal else None,
+            "recorded_zone1_hours": round(b["zone1_seconds"]/3600.0, 2) if recorded_ztotal else None,
+            "recorded_zone2_hours": round(b["zone2_seconds"]/3600.0, 2) if recorded_ztotal else None,
+            "recorded_zone3_hours": round(b["zone3_seconds"]/3600.0, 2) if recorded_ztotal else None,
+            "recorded_hr_zone_hours": round(recorded_ztotal/3600.0, 2) if recorded_ztotal else None,
+            "hard_blocks": b["hard_blocks"],
+            "activities_with_hard_blocks": b["activities_with_hard_blocks"],
+        })
+        cursor += timedelta(days=7)
+
+    for i, week in enumerate(weeks):
+        week["moving_hours_4wk"] = round(sum(w["moving_hours"] for w in weeks[max(0, i-3):i+1]), 2)
+    return weeks
+
+
+def build_training_summary(rows: list[dict], year: int | None, month: int | None, sport: str | None, volume: dict | None = None, weekly: list[dict] | None = None) -> dict:
     """Return the season summary as structured, JSON-friendly data."""
     ok = [r for r in rows if r["status"] == "ok"]
     errors = [r for r in rows if r["status"] == "error"]
@@ -751,6 +943,7 @@ def build_training_summary(rows: list[dict], year: int | None, month: int | None
         "errors": len(errors),
         "activity_types": dict(Counter((r.get("activity_type") or "unknown") for r in ok)),
         "volume": volume,
+        "weekly_training": weekly or [],
         "lt2": {
             "strong_observations": len(strong),
             "moderate_observations": len(moderate),
@@ -808,6 +1001,7 @@ def write_json_output(
         "generated_by": "training-analyser",
         "analysis_parameters": {
             "hrmax_bpm": args.hrmax,
+            "lt1_bpm": args.lt1,
             "lt2_bpm": args.lt2,
             "min_hr_bpm": args.min_hr,
             "max_hr_bpm": args.max_hr,
@@ -1072,6 +1266,7 @@ def run_training_scan(
                 path,
                 hrmax=args.hrmax,
                 lt2=args.lt2,
+                lt1=args.lt1,
                 min_hr=args.min_hr,
                 max_hr=args.max_hr,
             )
@@ -1126,8 +1321,9 @@ def run_training_scan(
                 print(f"Error updating activities.csv: {exc}", file=sys.stderr)
                 return 2
 
+    weekly = build_weekly_summary(rows, strava_metadata, args.year, args.month, args.sport)
     structured_summary = build_training_summary(
-        rows + error_rows, args.year, args.month, args.sport, volume
+        rows + error_rows, args.year, args.month, args.sport, volume, weekly
     )
 
     if args.json:
@@ -1171,6 +1367,13 @@ def main() -> int:
             "Error: --hrmax must lie between --min-hr and --max-hr.",
             file=sys.stderr,
         )
+        return 2
+
+    if (args.lt1 is None) != (args.lt2 is None):
+        print("Error: 3-zone reporting requires both --lt1 and --lt2 (or neither).", file=sys.stderr)
+        return 2
+    if args.lt1 is not None and not (args.min_hr < args.lt1 < args.lt2 < args.max_hr):
+        print("Error: require --min-hr < --lt1 < --lt2 < --max-hr.", file=sys.stderr)
         return 2
 
     files = supported_files(directory)

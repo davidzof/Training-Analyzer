@@ -199,6 +199,14 @@ A typical yearly cycling scan is:
 python3 scan_strava.py /home/user/Strava/activities --hrmax 184 --year 2025 --sport cycling --output cycling_2025.csv
 ```
 
+A multi-sport endurance scan can use a comma-separated sport list:
+
+```bash
+python3 scan_strava.py /home/user/Strava/activities --hrmax 183 --lt1 142 --lt2 160 --year 2026 --sport cycling,skiing,walking --json
+```
+
+Here `skiing` includes Nordic/cross-country and backcountry skiing, but not alpine/downhill skiing.
+
 With an explicit metadata file:
 
 ```bash
@@ -283,41 +291,60 @@ Append successfully analysed files missing from `activities.csv`. A one-time `ac
 
 ### `--sport`
 
-Restrict analysis to one normalized sport.
+Restrict analysis to one or more normalized sports. Multiple sports are supplied as a comma-separated list with no special weighting between them.
 
-Example:
+Examples:
 
 ```bash
 --sport cycling
+--sport cycling,skiing,walking
 ```
 
-Common normalized values include:
+If `--sport` is omitted, all activity types are eligible for the scan.
 
-```text
-cycling
-running
-walking
-skiing
-roller skiing
+The main normalized sport names currently understood are:
+
+| `--sport` value | Strava activity types included | Notes |
+|---|---|---|
+| `cycling` | Ride, VirtualRide, EBikeRide, MountainBikeRide, GravelRide | All are grouped as cycling. |
+| `running` | Run, VirtualRun, TrailRun | All are grouped as running. |
+| `walking` | Walk, Hike | Hiking is currently grouped with walking. |
+| `skiing` | Skiing, NordicSki, NordicSkiing, CrossCountrySki, CrossCountrySkiing, BackcountrySki | Intended for self-propelled skiing. It does **not** include alpine/downhill skiing. |
+| `roller skiing` | RollerSki, RollerSkiing | Kept separate from snow skiing. |
+
+Other Strava activity types are retained using a lower-case version of their original name, so they can still be selected explicitly when needed.
+
+In particular, alpine skiing is **not** an alias of `skiing`. Strava values such as `AlpineSki` or `alpine_skiing` remain separate activity types and therefore are excluded by:
+
+```bash
+--sport cycling,skiing,walking
 ```
 
-Several Strava activity labels are normalized automatically. For example, `Ride`, `VirtualRide`, `MountainBikeRide` and `GravelRide` are treated as `cycling`.
+This makes the above a useful multi-sport endurance scan when walking is deliberate base exercise and lift-served alpine skiing should not contribute to the default training-volume summary.
 
 ---
 
-### `--lt2`
+### `--lt1` and `--lt2`
 
-Optional known LT2 heart rate.
+Optional known lactate-threshold heart rates. When both are supplied, the analyser reports time in a simple three-zone model:
+
+```text
+Zone 1: HR < LT1
+Zone 2: LT1 <= HR < LT2
+Zone 3: HR >= LT2
+```
 
 Example:
 
 ```bash
---lt2 162
+--lt1 140 --lt2 160
 ```
 
-Usually omit this when using the archive to estimate historical LT2.
+Zone time is calculated from the same cleaned HR samples used by the rest of the analyser. Recording gaps and HR samples rejected as artefacts are not counted. The output includes seconds and percentages for each zone.
 
-If supplied, it can help the effort-classification logic.
+Zone reporting requires both thresholds. If they are omitted, zone fields remain `null`/empty. The scanner does not infer LT1 from a percentage of HRmax.
+
+`--lt2` also continues to help the existing effort-classification logic when supplied.
 
 ---
 
@@ -392,6 +419,8 @@ This produces:
 ```
 
 The JSON is designed for longitudinal analysis. It contains a compact top-level season summary plus the individual activity records used to support it. Missing observations use JSON `null`; unavailable capabilities are represented explicitly by the `has_*` flags. Hard-effort blocks and their gaps remain nested arrays rather than being flattened into strings.
+
+When `--lt1` and `--lt2` are supplied, each HR-equipped activity includes two complementary three-zone views. The existing `zone1_seconds`, `zone2_seconds`, `zone3_seconds` and `zone_total_seconds` fields preserve all continuously recorded HR time. The `active_zone1_seconds`, `active_zone2_seconds`, `active_zone3_seconds` and `active_zone_total_seconds` fields count only intervals with credible movement, currently **at least 2 km/h**. The lower threshold is deliberately sport-neutral: it is low enough to retain slow uphill skiing and walking while still removing stationary periods and most GPS drift. This also prevents a device left recording at work from becoming several hours of apparent training while preserving the original HR record. The season summary additionally contains `weekly_training`, which aggregates weekly moving hours, distance, climbing, long rides, active zone time and hard-effort counts.
 
 For a May-start cross-country skiing season:
 
@@ -1347,7 +1376,36 @@ The separate interval summary still reports only structured sessions.
 
 ---
 
-## 45. VAM section
+## 45. Weekly training and three-zone distribution
+
+The JSON season summary contains a `weekly_training` array. Weekly volume is based on Strava moving-time metadata where available, so rides without HR still count toward training hours. Empty calendar weeks between the first and last recorded activity are retained so genuine breaks in training remain visible. Weekly `zone1_hours`, `zone2_hours`, `zone3_hours`, `hr_zone_hours` and zone percentages are based on the active-cycling zone stream, while all continuously recorded HR time remains available as `recorded_zone1_hours`, `recorded_zone2_hours`, `recorded_zone3_hours` and `recorded_hr_zone_hours`.
+
+Each week can contain:
+
+```text
+week_start
+iso_year / iso_week
+activities
+moving_hours
+distance_km
+elevation_gain_m
+rides_3h
+activities_with_zone_data
+zone1_hours / zone2_hours / zone3_hours
+hr_zone_hours
+zone1_pct / zone2_pct / zone3_pct
+hard_blocks
+activities_with_hard_blocks
+moving_hours_4wk
+```
+
+`hr_zone_hours` is deliberately separate from total moving hours. This shows how much of the week actually had usable HR data and prevents missing HR from being silently treated as Zone 1.
+
+`moving_hours_4wk` is the sum of the current week and previous three calendar weeks. It gives an easy-to-read measure of recent training exposure without introducing an opaque training-load score.
+
+---
+
+## 46. VAM section
 
 The scanner reports:
 

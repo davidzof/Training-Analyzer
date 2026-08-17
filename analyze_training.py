@@ -2,7 +2,6 @@
 """
 Training-session analyser.
 
-
 Main ideas
 ----------
 V7 changes:
@@ -109,30 +108,49 @@ def resolve_single_activity_csv(activity_path: Path, explicit: Path | None) -> P
 def append_single_activity_metadata(path: Path, analysis: "ActivityAnalysis") -> bool:
     """Append one minimal row to a Strava activities.csv if it is absent.
 
-    The original column order and existing rows are preserved. Only values that
-    can be reconstructed reliably from the local activity file are populated;
-    Strava-only fields such as activity ID, gear and calories remain blank.
-    A one-time ``activities.csv.bak`` backup is created before the first append.
+    Strava exports may contain duplicate header names (notably ``Elapsed Time``
+    and ``Distance``).  The locally generated row deliberately populates only
+    the first/canonical occurrence of those duplicated fields.  Later duplicate
+    columns are left blank instead of mirroring values into them.
 
+    The first Strava ``Distance`` column is expressed in kilometres, while the
+    later detailed duplicate is normally metres.  Only values reconstructible
+    from the local activity file are populated; Strava-only fields such as
+    activity ID, gear and calories remain blank.
+
+    A one-time ``activities.csv.bak`` backup is created before the first append.
     Returns True when a new row was appended, False when it was already present.
     """
     if not path.is_file():
         raise FileNotFoundError(f"activities.csv not found: {path}")
 
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = list(reader.fieldnames or [])
-        existing = {
-            _normalise_export_filename(row.get("Filename"))
-            for row in reader
-            if row.get("Filename")
-        }
+        reader = csv.reader(handle)
+        try:
+            fieldnames = next(reader)
+        except StopIteration:
+            raise ValueError("activities.csv is empty")
 
-    required = {
+        def first_index(name: str) -> int | None:
+            try:
+                return fieldnames.index(name)
+            except ValueError:
+                return None
+
+        filename_idx = first_index("Filename")
+        if filename_idx is None:
+            raise ValueError("activities.csv cannot be updated; missing column: Filename")
+
+        existing = set()
+        for row in reader:
+            if filename_idx < len(row) and row[filename_idx]:
+                existing.add(_normalise_export_filename(row[filename_idx]))
+
+    required = [
         "Filename", "Activity Date", "Activity Type", "Elapsed Time",
         "Moving Time", "Distance", "Elevation Gain",
-    }
-    missing = sorted(required - set(fieldnames))
+    ]
+    missing = [name for name in required if first_index(name) is None]
     if missing:
         raise ValueError(
             "activities.csv cannot be updated; missing columns: " + ", ".join(missing)
@@ -142,17 +160,28 @@ def append_single_activity_metadata(path: Path, analysis: "ActivityAnalysis") ->
     if filename in existing:
         return False
 
-    record = {name: "" for name in fieldnames}
-    record["Filename"] = f"activities/{filename}"
-    record["Activity Date"] = _strava_date_string(analysis.start_time)
-    record["Activity Type"] = _strava_activity_type(analysis.activity_type)
+    row = [""] * len(fieldnames)
+
+    def set_first(name: str, value: str) -> None:
+        idx = first_index(name)
+        if idx is not None:
+            row[idx] = value
+
+    set_first("Filename", f"activities/{filename}")
+    set_first("Activity Date", _strava_date_string(analysis.start_time))
+    set_first("Activity Type", _strava_activity_type(analysis.activity_type))
+
     duration_s = int(round(analysis.duration_s))
-    record["Elapsed Time"] = str(duration_s)
-    record["Moving Time"] = str(duration_s)
-    record["Distance"] = f"{analysis.distance_m:.1f}"
+    set_first("Elapsed Time", str(duration_s))
+    set_first("Moving Time", str(duration_s))
+
+    # The first/canonical Strava Distance field is kilometres.
+    set_first("Distance", f"{analysis.distance_m / 1000.0:.2f}")
+
     if analysis.elevation_gain_m is not None:
-        record["Elevation Gain"] = f"{analysis.elevation_gain_m:.1f}"
-    if "Activity Name" in record:
+        set_first("Elevation Gain", f"{analysis.elevation_gain_m:.1f}")
+
+    if first_index("Activity Name") is not None:
         # Remove both compression and activity-format suffixes where possible.
         name = filename
         if name.lower().endswith(".gz"):
@@ -161,15 +190,14 @@ def append_single_activity_metadata(path: Path, analysis: "ActivityAnalysis") ->
             if name.lower().endswith(suffix):
                 name = name[:-len(suffix)]
                 break
-        record["Activity Name"] = name
+        set_first("Activity Name", name)
 
     backup = path.with_suffix(path.suffix + ".bak")
     if not backup.exists():
         shutil.copy2(path, backup)
 
     with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writerow(record)
+        csv.writer(handle).writerow(row)
     return True
 
 # ---------------------------------------------------------------------------
@@ -635,6 +663,41 @@ def time_above(samples, threshold):
         if 0 < dt <= 10 and a.heart_rate >= threshold:
             total += dt
     return total
+
+def time_in_three_zones(samples, lt1, lt2, active_only=False, min_active_speed_kmh=2.0):
+    """Return seconds in a 3-zone HR model using cleaned HR samples.
+
+    Zone 1: HR < LT1
+    Zone 2: LT1 <= HR < LT2
+    Zone 3: HR >= LT2
+
+    Recorded-zone time counts every continuous HR interval (<=10 s).  When
+    ``active_only`` is true, an interval is counted only when the samples imply
+    credible cycling movement of at least ``min_active_speed_kmh``.  This keeps
+    long recordings left running at work useful as recorded-HR evidence without
+    treating office movement or stationary time as cycling training.
+    """
+    if lt1 is None or lt2 is None or lt1 >= lt2:
+        return None, None, None, None
+    z1 = z2 = z3 = 0.0
+    for a, b in zip(samples, samples[1:]):
+        dt = (b.timestamp-a.timestamp).total_seconds()
+        if not (0 < dt <= 10):
+            continue
+        if active_only:
+            d = segment_distance_m(a, b)
+            speed_kmh = (d / dt) * 3.6 if dt > 0 else 0.0
+            if speed_kmh < min_active_speed_kmh:
+                continue
+        hr = a.heart_rate
+        if hr < lt1:
+            z1 += dt
+        elif hr < lt2:
+            z2 += dt
+        else:
+            z3 += dt
+    total = z1 + z2 + z3
+    return z1, z2, z3, total
 
 
 # ---------------------------------------------------------------------------
@@ -1494,6 +1557,14 @@ class ActivityAnalysis:
     vam_comparison_text: str | None
     time85_s: float | None
     time90_s: float | None
+    zone1_s: float | None
+    zone2_s: float | None
+    zone3_s: float | None
+    zone_total_s: float | None
+    active_zone1_s: float | None
+    active_zone2_s: float | None
+    active_zone3_s: float | None
+    active_zone_total_s: float | None
     detection_threshold: float | None
     blocks: list[Block]
     gaps: list[GapInfo]
@@ -1520,7 +1591,7 @@ class ActivityAnalysis:
 
 
 def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
-                     min_hr: int = 50, max_hr: int = 220) -> ActivityAnalysis:
+                     lt1: float | None = None, min_hr: int = 50, max_hr: int = 220) -> ActivityAnalysis:
     """
     Analyse one activity and return structured results.
 
@@ -1621,6 +1692,8 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
             vam_comparison_text=comparison,
             time85_s=None,
             time90_s=None,
+            zone1_s=None, zone2_s=None, zone3_s=None, zone_total_s=None,
+            active_zone1_s=None, active_zone2_s=None, active_zone3_s=None, active_zone_total_s=None,
             detection_threshold=None,
             blocks=[],
             gaps=[],
@@ -1687,6 +1760,10 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
 
     t85 = time_above(hrs, 0.85*hrmax)
     t90 = time_above(hrs, 0.90*hrmax)
+    zone1_s, zone2_s, zone3_s, zone_total_s = time_in_three_zones(hrs, lt1, lt2)
+    active_zone1_s, active_zone2_s, active_zone3_s, active_zone_total_s = time_in_three_zones(
+        hrs, lt1, lt2, active_only=True
+    )
 
     overall = overall_ride_character(duration, avg_hr, hrmax)
     key_effort, key_conf = classify_key_effort(groups, gaps, hrmax, lt2)
@@ -1741,6 +1818,8 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         vam_comparison_text=comparison,
         time85_s=t85,
         time90_s=t90,
+        zone1_s=zone1_s, zone2_s=zone2_s, zone3_s=zone3_s, zone_total_s=zone_total_s,
+        active_zone1_s=active_zone1_s, active_zone2_s=active_zone2_s, active_zone3_s=active_zone3_s, active_zone_total_s=active_zone_total_s,
         detection_threshold=detection_threshold,
         blocks=blocks,
         gaps=gaps,
@@ -1897,6 +1976,18 @@ def print_analysis(a: ActivityAnalysis):
     print(f"Classification:   {a.classification}")
     print(f"Confidence:       {a.confidence}")
 
+    if a.zone_total_s is not None and a.zone_total_s > 0:
+        print()
+        print("3-zone HR model (recorded HR):")
+        for label, seconds in (("Zone 1", a.zone1_s), ("Zone 2", a.zone2_s), ("Zone 3", a.zone3_s)):
+            pct = 100.0 * seconds / a.zone_total_s if seconds is not None else 0.0
+            print(f"{label + ':':17} {fmt_time(seconds):>8}  ({pct:4.1f}%)")
+        if a.active_zone_total_s is not None and a.active_zone_total_s > 0:
+            print("3-zone HR model (active cycling >=2 km/h):")
+            for label, seconds in (("Zone 1", a.active_zone1_s), ("Zone 2", a.active_zone2_s), ("Zone 3", a.active_zone3_s)):
+                pct = 100.0 * seconds / a.active_zone_total_s if seconds is not None else 0.0
+                print(f"{label + ':':17} {fmt_time(seconds):>8}  ({pct:4.1f}%)")
+
     if a.lt2_low is not None:
         print(f"LT2 candidate:    {a.lt2_low:.1f}-{a.lt2_high:.1f} bpm")
     else:
@@ -1914,6 +2005,7 @@ def main():
     )
     p.add_argument("file", type=Path)
     p.add_argument("--hrmax", type=int, required=True)
+    p.add_argument("--lt1", type=float, default=None, help="Optional known LT1 HR for 3-zone time-in-zone reporting")
     p.add_argument("--lt2", type=float, default=None)
     p.add_argument("--min-hr", type=int, default=50)
     p.add_argument("--max-hr", type=int, default=220)
@@ -1935,7 +2027,7 @@ def main():
 
     try:
         result = analyze_activity(
-            args.file, args.hrmax, args.lt2, args.min_hr, args.max_hr
+            args.file, args.hrmax, args.lt2, args.lt1, args.min_hr, args.max_hr
         )
     except Exception as exc:
         print(f"Error reading/analyzing file: {exc}", file=sys.stderr)

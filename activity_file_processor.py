@@ -406,6 +406,20 @@ class TrainingSummary:
     vam_comparison: str | None
     time_85pct_seconds: float | None
     time_90pct_seconds: float | None
+    zone1_seconds: float | None
+    zone2_seconds: float | None
+    zone3_seconds: float | None
+    zone_total_seconds: float | None
+    active_zone1_seconds: float | None
+    active_zone2_seconds: float | None
+    active_zone3_seconds: float | None
+    active_zone_total_seconds: float | None
+    active_zone1_pct: float | None
+    active_zone2_pct: float | None
+    active_zone3_pct: float | None
+    zone1_pct: float | None
+    zone2_pct: float | None
+    zone3_pct: float | None
     hard_block_threshold_bpm: float | None
     hard_block_count: int
     hard_blocks: list[dict]
@@ -530,6 +544,7 @@ def process_training_file(
     path: Path,
     hrmax: int,
     lt2: float | None = None,
+    lt1: float | None = None,
     min_hr: int = 50,
     max_hr: int = 220,
 ) -> TrainingSummary:
@@ -552,7 +567,7 @@ def process_training_file(
             best_4h_hr_p90=None,
             vam_15=None, vam_30=None, vam_60=None, vam_retention_pct=None,
             vam_comparison=None, time_85pct_seconds=None,
-            time_90pct_seconds=None, hard_block_threshold_bpm=None, hard_block_count=0,
+            time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
             hard_blocks=[], hard_block_gaps=[], interval_count=None, interval_work_total=None,
             interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
@@ -572,7 +587,7 @@ def process_training_file(
 
     try:
         result = analyze_activity(
-            path, hrmax=hrmax, lt2=lt2, min_hr=min_hr, max_hr=max_hr
+            path, hrmax=hrmax, lt2=lt2, lt1=lt1, min_hr=min_hr, max_hr=max_hr
         )
         sustained2h = result.sustained2h
         sustained4h = result.sustained4h
@@ -610,6 +625,20 @@ def process_training_file(
             vam_comparison=result.vam_comparison_text,
             time_85pct_seconds=round(result.time85_s, 1) if result.time85_s is not None else None,
             time_90pct_seconds=round(result.time90_s, 1) if result.time90_s is not None else None,
+            zone1_seconds=round(result.zone1_s, 1) if result.zone1_s is not None else None,
+            zone2_seconds=round(result.zone2_s, 1) if result.zone2_s is not None else None,
+            zone3_seconds=round(result.zone3_s, 1) if result.zone3_s is not None else None,
+            zone_total_seconds=round(result.zone_total_s, 1) if result.zone_total_s is not None else None,
+            active_zone1_seconds=round(result.active_zone1_s, 1) if result.active_zone1_s is not None else None,
+            active_zone2_seconds=round(result.active_zone2_s, 1) if result.active_zone2_s is not None else None,
+            active_zone3_seconds=round(result.active_zone3_s, 1) if result.active_zone3_s is not None else None,
+            active_zone_total_seconds=round(result.active_zone_total_s, 1) if result.active_zone_total_s is not None else None,
+            active_zone1_pct=round(100.0*result.active_zone1_s/result.active_zone_total_s, 1) if result.active_zone_total_s else None,
+            active_zone2_pct=round(100.0*result.active_zone2_s/result.active_zone_total_s, 1) if result.active_zone_total_s else None,
+            active_zone3_pct=round(100.0*result.active_zone3_s/result.active_zone_total_s, 1) if result.active_zone_total_s else None,
+            zone1_pct=round(100.0*result.zone1_s/result.zone_total_s, 1) if result.zone_total_s else None,
+            zone2_pct=round(100.0*result.zone2_s/result.zone_total_s, 1) if result.zone_total_s else None,
+            zone3_pct=round(100.0*result.zone3_s/result.zone_total_s, 1) if result.zone_total_s else None,
             hard_block_threshold_bpm=round(result.detection_threshold, 1) if result.detection_threshold is not None else None,
             hard_block_count=len(result.blocks),
             hard_blocks=_serialize_hard_blocks(result),
@@ -658,7 +687,7 @@ def process_training_file(
             best_4h_hr_p90=None,
             vam_15=None, vam_30=None, vam_60=None, vam_retention_pct=None,
             vam_comparison=None, time_85pct_seconds=None,
-            time_90pct_seconds=None, hard_block_threshold_bpm=None, hard_block_count=0,
+            time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
             hard_blocks=[], hard_block_gaps=[], interval_count=None, interval_work_total=None,
             interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
