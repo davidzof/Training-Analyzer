@@ -2,12 +2,12 @@
 """
 Scan GPX/TCX/FIT activity files for training analysis.
 
-This version is training-analysis only: --hrmax is required. It writes per-ride
+This version is training-analysis only: --hrmax is required. It writes per-activity
 HRmax evidence, sustained HR observations (30m/60m/90m/2h/4h), VAM
 (15m/30m/60m), LT2 evidence and HR artefact flags.
 
 When Strava activities.csv is available it also supplies bike metadata and
-annual/season volume totals (all matching activities, including rides without HR).
+annual/season volume totals (all matching activities, including activities without HR).
 
 Structured JSON output is available via --json. Activities without usable HR
 are still retained for distance, elevation and VAM analysis.
@@ -27,6 +27,141 @@ import re
 import shutil
 
 from activity_file_processor import detect_format, process_training_file
+
+
+MESSAGES = {
+    "en": {
+        "description": "Parse GPX, TCX and FIT files and run training analysis. --hrmax is required as the yearly analysis reference.",
+        "directory_help": "Directory containing activity files",
+        "lang_help": "Language for console/help text (default: English)",
+        "min_hr_help": "Minimum accepted HR in bpm (default: 50)",
+        "max_hr_help": "Maximum accepted HR in bpm (default: 220)",
+        "hrmax_help": "Yearly HRmax reference used by the training analysis, e.g. --hrmax 184",
+        "season_summary": "Season summary",
+        "training_summary": "Training summary",
+        "activities_processed": "Activities processed:             {value}",
+        "activities_with_hr": "Activities with usable HR:        {value}",
+        "activities_without_hr": "Activities without usable HR:     {value}",
+        "errors": "Errors:                           {value}",
+        "activities_metadata": "Activities in Strava metadata:    {value}",
+        "total_moving": "Total moving time:                {value:.1f} h",
+        "total_distance": "Total distance:                   {value:.0f} km",
+        "total_elevation": "Total elevation gain:             {value:.0f} m",
+        "long_activities": "Long activities >=3h / >=4h / >=6h: {a3} / {a4} / {a6}",
+        "activity_types": "Activity types:                    {value}",
+        "strong_lt2": "Strong LT2 observations:          {value}",
+        "moderate_lt2": "Moderate LT2 observations:        {value}",
+        "median_lt2": "Median strong LT2 range:           {value}",
+        "insufficient": "insufficient evidence",
+        "highest_hrmax": "Highest credible HRmax candidates:",
+        "highest_raw_hr": "Highest raw HR observations:        {value}",
+        "qualifying_2h": "Qualifying 2h sustained windows:   {value}",
+        "qualifying_4h": "Qualifying 4h sustained windows:   {value}",
+        "comparable_vam": "Comparable VAM activities:         {value}",
+        "vam_by_bike": "VAM by bike (comparable activities)",
+        "bike_activities": "{bike} ({count} activities{weight})",
+        "detected_intervals": "Detected interval sessions:        {value}",
+        "hr_artefacts": "Activities with HR artefact flag:  {value}",
+        "metadata_skipped": "Metadata update skipped: no activities.csv found",
+        "metadata_appended": "Metadata rows appended: {value}",
+        "metadata_update_error": "Error updating activities.csv: {value}",
+        "supported_files": "Supported files found: {value}",
+        "filtered_out": "Filtered out:          {value}",
+        "processed_short": "Activities processed:  {value}",
+        "with_hr_short": "With usable HR:        {value}",
+        "without_hr_short": "Without usable HR:     {value}",
+        "errors_short": "Errors:                {value}",
+        "written_to": "{kind} written to:        {value}",
+        "err_not_dir": "Error: not a directory: {value}",
+        "err_month_year": "Error: --month requires --year.",
+        "err_minmax": "Error: --min-hr must be lower than --max-hr.",
+        "err_hrmax": "Error: --hrmax must lie between --min-hr and --max-hr.",
+        "err_zones": "Error: 3-zone reporting requires both --lt1 and --lt2 (or neither).",
+        "err_threshold_order": "Error: require --min-hr < --lt1 < --lt2 < --max-hr.",
+        "err_load_metadata": "Error loading Strava activities.csv: {value}",
+        "strava_metadata": "Strava metadata:       {value}",
+        "metadata_rows": "Metadata rows loaded:  {value}",
+        "metadata_missing": "Strava metadata:       not found (bike fields will be blank)",
+        "csv_rows_matched": "CSV rows matched:      {value}",
+        "matching_files": "Matching files found:  {value}",
+        "csv_missing_file": "CSV rows missing file: {value}",
+        "error_prefix": "ERROR",
+    },
+    "fr": {
+        "description": "Analyse les fichiers GPX, TCX et FIT pour l'entraînement. --hrmax est requis comme référence annuelle.",
+        "directory_help": "Dossier contenant les fichiers d'activité",
+        "lang_help": "Langue des messages et de l'aide (par défaut : anglais)",
+        "min_hr_help": "FC minimale acceptée en bpm (défaut : 50)",
+        "max_hr_help": "FC maximale acceptée en bpm (défaut : 220)",
+        "hrmax_help": "Référence annuelle de FC max utilisée pour l'analyse, par ex. --hrmax 184",
+        "season_summary": "Résumé de la saison",
+        "training_summary": "Résumé d'entraînement",
+        "activities_processed": "Activités traitées :              {value}",
+        "activities_with_hr": "Activités avec FC exploitable :    {value}",
+        "activities_without_hr": "Activités sans FC exploitable :   {value}",
+        "errors": "Erreurs :                          {value}",
+        "activities_metadata": "Activités dans les métadonnées :   {value}",
+        "total_moving": "Temps total en mouvement :          {value:.1f} h",
+        "total_distance": "Distance totale :                   {value:.0f} km",
+        "total_elevation": "Dénivelé positif total :            {value:.0f} m",
+        "long_activities": "Activités longues >=3h / >=4h / >=6h : {a3} / {a4} / {a6}",
+        "activity_types": "Types d'activité :                  {value}",
+        "strong_lt2": "Observations LT2 fortes :           {value}",
+        "moderate_lt2": "Observations LT2 modérées :        {value}",
+        "median_lt2": "Plage LT2 médiane (forte) :        {value}",
+        "insufficient": "preuves insuffisantes",
+        "highest_hrmax": "Meilleurs candidats crédibles de FC max :",
+        "highest_raw_hr": "FC brutes les plus élevées :        {value}",
+        "qualifying_2h": "Fenêtres soutenues de 2 h valides : {value}",
+        "qualifying_4h": "Fenêtres soutenues de 4 h valides : {value}",
+        "comparable_vam": "Activités VAM comparables :         {value}",
+        "vam_by_bike": "VAM par vélo (activités comparables)",
+        "bike_activities": "{bike} ({count} activités{weight})",
+        "detected_intervals": "Séances d'intervalles détectées :   {value}",
+        "hr_artefacts": "Activités avec artefact FC signalé : {value}",
+        "metadata_skipped": "Mise à jour des métadonnées ignorée : activities.csv introuvable",
+        "metadata_appended": "Lignes de métadonnées ajoutées : {value}",
+        "metadata_update_error": "Erreur lors de la mise à jour de activities.csv : {value}",
+        "supported_files": "Fichiers pris en charge trouvés : {value}",
+        "filtered_out": "Filtrés :                    {value}",
+        "processed_short": "Activités traitées :        {value}",
+        "with_hr_short": "Avec FC exploitable :        {value}",
+        "without_hr_short": "Sans FC exploitable :       {value}",
+        "errors_short": "Erreurs :                    {value}",
+        "written_to": "{kind} écrit dans :           {value}",
+        "err_not_dir": "Erreur : ce n'est pas un dossier : {value}",
+        "err_month_year": "Erreur : --month nécessite --year.",
+        "err_minmax": "Erreur : --min-hr doit être inférieur à --max-hr.",
+        "err_hrmax": "Erreur : --hrmax doit être compris entre --min-hr et --max-hr.",
+        "err_zones": "Erreur : le rapport en 3 zones nécessite --lt1 et --lt2 ensemble (ou aucun).",
+        "err_threshold_order": "Erreur : il faut --min-hr < --lt1 < --lt2 < --max-hr.",
+        "err_load_metadata": "Erreur lors du chargement de Strava activities.csv : {value}",
+        "strava_metadata": "Métadonnées Strava :      {value}",
+        "metadata_rows": "Lignes de métadonnées :   {value}",
+        "metadata_missing": "Métadonnées Strava :      introuvables (champs vélo laissés vides)",
+        "csv_rows_matched": "Lignes CSV correspondantes : {value}",
+        "matching_files": "Fichiers correspondants :    {value}",
+        "csv_missing_file": "Lignes CSV sans fichier :    {value}",
+        "error_prefix": "ERREUR",
+    },
+}
+
+
+def detect_language(argv: list[str] | None = None) -> str:
+    """Return the explicitly requested language, defaulting to English."""
+    argv = sys.argv[1:] if argv is None else argv
+    for i, arg in enumerate(argv):
+        if arg == "--lang" and i + 1 < len(argv):
+            return argv[i + 1] if argv[i + 1] in MESSAGES else "en"
+        if arg.startswith("--lang="):
+            value = arg.split("=", 1)[1]
+            return value if value in MESSAGES else "en"
+    return "en"
+
+
+def t(key: str, lang: str, **kwargs) -> str:
+    template = MESSAGES.get(lang, MESSAGES["en"]).get(key, MESSAGES["en"].get(key, key))
+    return template.format(**kwargs)
 
 
 TRAINING_CSV_FIELDS = [
@@ -120,42 +255,43 @@ TRAINING_CSV_FIELDS = [
 ]
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Parse GPX, TCX and FIT files and run training analysis. "
-            "--hrmax is required as the yearly analysis reference."
-        )
-    )
+def build_parser(lang: str = "en") -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=t("description", lang))
     parser.add_argument(
         "directory",
         type=Path,
-        help="Directory containing activity files",
+        help=t("directory_help", lang),
+    )
+    parser.add_argument(
+        "--lang",
+        choices=("en", "fr"),
+        default=lang,
+        help=t("lang_help", lang),
     )
     parser.add_argument(
         "--min-hr",
         type=int,
         default=50,
-        help="Minimum accepted HR in bpm (default: 50)",
+        help=t("min_hr_help", lang),
     )
     parser.add_argument(
         "--max-hr",
         type=int,
         default=220,
-        help="Maximum accepted HR in bpm (default: 220)",
+        help=t("max_hr_help", lang),
     )
     parser.add_argument(
         "--hrmax",
         type=int,
         required=True,
-        help="Yearly HRmax reference used by the training analysis, e.g. --hrmax 184",
+        help=t("hrmax_help", lang),
     )
     parser.add_argument(
         "--lt1",
         type=float,
         default=None,
         help=(
-            "Optional known LT1 HR for per-ride and weekly 3-zone time-in-zone "
+            "Optional known LT1 HR for per-activity and weekly 3-zone time-in-zone "
             "reporting. Zone reporting requires both --lt1 and --lt2."
         ),
     )
@@ -519,6 +655,14 @@ def enrich_training_row(row: dict, metadata: dict[str, dict]) -> dict:
         "athlete_weight",
     ):
         enriched[field] = info.get(field)
+
+    # Strava's Activity Gear field is generic: it can be a bicycle, running
+    # shoe, ski equipment, etc. Keep activity_gear for every sport, but only
+    # expose bike-specific metadata for cycling activities.
+    if normalize_strava_sport(enriched.get("activity_type")) != "cycling":
+        enriched["bike_weight"] = None
+        enriched["bike_id"] = None
+
     return enriched
 
 
@@ -665,10 +809,20 @@ def metadata_volume_summary(metadata: dict[str, dict], year: int | None, month: 
     distance = [float(r["distance_m_meta"]) for r in rows if r.get("distance_m_meta") is not None]
     elev = [float(r["elevation_gain_m_meta"]) for r in rows if r.get("elevation_gain_m_meta") is not None]
     durations = [float(r.get("moving_time_s") or r.get("elapsed_time_s")) for r in rows if (r.get("moving_time_s") is not None or r.get("elapsed_time_s") is not None)]
+    moving_by_sport = Counter()
+    for r in rows:
+        if r.get("moving_time_s") is None:
+            continue
+        sport_name = normalize_strava_sport(r.get("strava_activity_type")) or "unknown"
+        moving_by_sport[sport_name] += float(r["moving_time_s"])
     return {
         "activities": len(rows),
         "elapsed_hours": sum(elapsed)/3600 if elapsed else None,
         "moving_hours": sum(moving)/3600 if moving else None,
+        "hours_by_sport": {
+            name: round(seconds/3600.0, 2)
+            for name, seconds in sorted(moving_by_sport.items())
+        },
         "distance_km": sum(distance)/1000 if distance else None,
         "elevation_gain_m": sum(elev) if elev else None,
         "rides_3h": sum(v >= 3*3600 for v in durations),
@@ -757,6 +911,7 @@ def build_weekly_summary(
             "activities_with_active_zone_data": 0,
             "hard_blocks": 0,
             "activities_with_hard_blocks": 0,
+            "moving_seconds_by_sport": Counter(),
         })
         b["activities"] += 1
         moving = info.get("moving_time_s")
@@ -764,7 +919,12 @@ def build_weekly_summary(
         if moving is None and row is not None:
             moving = _duration_seconds_hms(row.get("duration"))
         duration_s = float(moving if moving is not None else (elapsed or 0.0))
-        b["moving_seconds"] += max(0.0, duration_s)
+        duration_s = max(0.0, duration_s)
+        b["moving_seconds"] += duration_s
+        actual_sport = normalize_strava_sport(
+            info.get("strava_activity_type") or (row.get("activity_type") if row is not None else None)
+        ) or "unknown"
+        b["moving_seconds_by_sport"][actual_sport] += duration_s
         if duration_s >= 3*3600:
             b["rides_3h"] += 1
         if info.get("distance_m_meta") is not None:
@@ -802,7 +962,7 @@ def build_weekly_summary(
             "active_zone1_seconds": 0.0, "active_zone2_seconds": 0.0,
             "active_zone3_seconds": 0.0, "active_zone_total_seconds": 0.0,
             "activities_with_zone_data": 0, "activities_with_active_zone_data": 0, "hard_blocks": 0,
-            "activities_with_hard_blocks": 0,
+            "activities_with_hard_blocks": 0, "moving_seconds_by_sport": Counter(),
         })
         recorded_ztotal = b["zone_total_seconds"]
         active_ztotal = b["active_zone_total_seconds"]
@@ -813,6 +973,10 @@ def build_weekly_summary(
             "iso_week": iso.week,
             "activities": b["activities"],
             "moving_hours": round(b["moving_seconds"]/3600.0, 2),
+            "hours_by_sport": {
+                name: round(seconds/3600.0, 2)
+                for name, seconds in sorted(b["moving_seconds_by_sport"].items())
+            },
             "distance_km": round(b["distance_m"]/1000.0, 1),
             "elevation_gain_m": round(b["elevation_gain_m"], 0),
             "rides_3h": b["rides_3h"],
@@ -886,15 +1050,17 @@ def build_training_summary(rows: list[dict], year: int | None, month: int | None
         and str(r["vam_comparison"]).startswith("comparable:")
     ]
 
+    cycling_rows = [r for r in ok if normalize_strava_sport(r.get("activity_type")) == "cycling"]
+    comparable_cycling = [r for r in comparable if normalize_strava_sport(r.get("activity_type")) == "cycling"]
     bike_names = []
-    for r in ok:
+    for r in cycling_rows:
         name = r.get("activity_gear") or "unknown"
         if name not in bike_names:
             bike_names.append(name)
     bikes = []
     for bike in bike_names:
-        all_bike_rows = [r for r in ok if (r.get("activity_gear") or "unknown") == bike]
-        bike_rows = [r for r in comparable if (r.get("activity_gear") or "unknown") == bike]
+        all_bike_rows = [r for r in cycling_rows if (r.get("activity_gear") or "unknown") == bike]
+        bike_rows = [r for r in comparable_cycling if (r.get("activity_gear") or "unknown") == bike]
         if not bike_rows:
             continue
         weights = [float(r["bike_weight"]) for r in bike_rows if r.get("bike_weight") is not None]
@@ -1014,7 +1180,7 @@ def write_json_output(
         handle.write("\n")
 
 
-def print_training_summary(rows: list[dict], year: int | None, month: int | None, sport: str | None, volume: dict | None = None):
+def print_training_summary(rows: list[dict], year: int | None, month: int | None, sport: str | None, volume: dict | None = None, lang: str = "en"):
     ok = [r for r in rows if r["status"] == "ok"]
     with_hr = [r for r in ok if bool(r.get("has_hr"))]
     without_hr = [r for r in ok if not bool(r.get("has_hr"))]
@@ -1027,31 +1193,31 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
         final_month = 12 if month == 1 else month - 1
         final_year = year if month == 1 else year + 1
         label = f"{start.strftime('%b %Y')} to {datetime(final_year, final_month, 1).strftime('%b %Y')}"
-        print(f"Season summary: {label}" + (f" / {sport}" if sport else ""))
+        print(f"{t("season_summary", lang)}: {label}" + (f" / {sport}" if sport else ""))
     elif year is not None and sport:
-        print(f"Season summary: {year} / {sport}")
+        print(f"{t("season_summary", lang)}: {year} / {sport}")
     elif year is not None:
-        print(f"Season summary: {year}")
+        print(f"{t("season_summary", lang)}: {year}")
     elif sport:
-        print(f"Training summary: {sport}")
+        print(f"{t("training_summary", lang)}: {sport}")
     else:
-        print("Training summary")
+        print(t("training_summary", lang))
     print("-" * 48)
 
-    print(f"Activities processed:             {len(ok)}")
-    print(f"Activities with usable HR:        {len(with_hr)}")
-    print(f"Activities without usable HR:     {len(without_hr)}")
-    print(f"Errors:                           {sum(r['status'] == 'error' for r in rows)}")
+    print(t("activities_processed", lang, value=len(ok)))
+    print(t("activities_with_hr", lang, value=len(with_hr)))
+    print(t("activities_without_hr", lang, value=len(without_hr)))
+    print(t("errors", lang, value=sum(r["status"] == "error" for r in rows)))
 
     if volume is not None:
-        print(f"Activities in Strava metadata:    {volume['activities']}")
+        print(t("activities_metadata", lang, value=volume["activities"]))
         if volume.get("moving_hours") is not None:
-            print(f"Total moving time:                {volume['moving_hours']:.1f} h")
+            print(t("total_moving", lang, value=volume["moving_hours"]))
         if volume.get("distance_km") is not None:
-            print(f"Total distance:                   {volume['distance_km']:.0f} km")
+            print(t("total_distance", lang, value=volume["distance_km"]))
         if volume.get("elevation_gain_m") is not None:
-            print(f"Total elevation gain:             {volume['elevation_gain_m']:.0f} m")
-        print(f"Long rides >=3h / >=4h / >=6h:   {volume['rides_3h']} / {volume['rides_4h']} / {volume['rides_6h']}")
+            print(t("total_elevation", lang, value=volume["elevation_gain_m"]))
+        print(t("long_activities", lang, a3=volume["rides_3h"], a4=volume["rides_4h"], a6=volume["rides_6h"]))
 
     if not ok:
         return
@@ -1059,26 +1225,24 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
     types = Counter((r["activity_type"] or "unknown") for r in ok)
     if len(types) > 1:
         print(
-            "Activity types:                    "
-            + ", ".join(f"{k}={v}" for k, v in types.most_common())
+            t("activity_types", lang, value=", ".join(f"{k}={v}" for k, v in types.most_common()))
         )
 
     strong = [r for r in with_hr if r["lt2_evidence"] == "strong"]
     moderate = [r for r in with_hr if r["lt2_evidence"] == "moderate"]
 
-    print(f"Strong LT2 observations:          {len(strong)}")
-    print(f"Moderate LT2 observations:        {len(moderate)}")
+    print(t("strong_lt2", lang, value=len(strong)))
+    print(t("moderate_lt2", lang, value=len(moderate)))
 
     strong_lows = [r["lt2_low"] for r in strong if r["lt2_low"] is not None]
     strong_highs = [r["lt2_high"] for r in strong if r["lt2_high"] is not None]
 
     if strong_lows and strong_highs:
         print(
-            f"Median strong LT2 range:           "
-            f"{median(strong_lows):.1f}-{median(strong_highs):.1f} bpm"
+            t("median_lt2", lang, value=f"{median(strong_lows):.1f}-{median(strong_highs):.1f} bpm")
         )
     else:
-        print("Median strong LT2 range:           insufficient evidence")
+        print(t("median_lt2", lang, value=t("insufficient", lang)))
 
     best30 = top_values(r["best_30m_hr"] for r in with_hr)
     best60 = top_values(r["best_60m_hr"] for r in with_hr)
@@ -1111,7 +1275,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
         credible_sorted = sorted(
             credible, key=lambda r: float(r["hrmax_candidate"]), reverse=True
         )[:5]
-        print("Highest credible HRmax candidates:")
+        print(t("highest_hrmax", lang))
         for r in credible_sorted:
             print(
                 f"  {float(r['hrmax_candidate']):.1f} bpm "
@@ -1121,19 +1285,18 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
     raw_top = top_values((r.get("raw_max_hr") for r in with_hr), n=5)
     if raw_top:
         print(
-            "Highest raw HR observations:        "
-            + ", ".join(f"{v:.0f}" for v in raw_top)
+            t("highest_raw_hr", lang, value=", ".join(f"{v:.0f}" for v in raw_top))
         )
 
     best2h = top_values((r.get("best_2h_hr") for r in with_hr))
     best4h = top_values((r.get("best_4h_hr") for r in with_hr))
-    print(f"Qualifying 2h sustained windows:   {sum(r.get('best_2h_hr') is not None for r in ok)}")
+    print(t("qualifying_2h", lang, value=sum(r.get("best_2h_hr") is not None for r in ok)))
     if best2h:
         print(
             "Top 2h sustained HR observations:   "
             + ", ".join(f"{v:.1f}" for v in best2h)
         )
-    print(f"Qualifying 4h sustained windows:   {sum(r.get('best_4h_hr') is not None for r in ok)}")
+    print(t("qualifying_4h", lang, value=sum(r.get("best_4h_hr") is not None for r in ok)))
     if best4h:
         print(
             "Top 4h sustained HR observations:   "
@@ -1148,7 +1311,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
         and r["vam_comparison"].startswith("comparable:")
     ]
 
-    print(f"Comparable VAM activities:         {len(comparable)}")
+    print(t("comparable_vam", lang, value=len(comparable)))
     if comparable:
         best_vam15 = top_values(r["vam_15"] for r in comparable)
         best_vam30 = top_values(r["vam_30"] for r in comparable)
@@ -1181,13 +1344,15 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
                 f"{median(retention):.1f}%"
             )
 
-    bikes = Counter((r.get("activity_gear") or "unknown") for r in ok)
+    cycling_rows = [r for r in ok if normalize_strava_sport(r.get("activity_type")) == "cycling"]
+    comparable_cycling = [r for r in comparable if normalize_strava_sport(r.get("activity_type")) == "cycling"]
+    bikes = Counter((r.get("activity_gear") or "unknown") for r in cycling_rows)
     if any(name != "unknown" for name in bikes):
         print()
-        print("VAM by bike (comparable activities)")
+        print(t("vam_by_bike", lang))
         print("-" * 48)
         for bike, activity_count in bikes.most_common():
-            bike_rows = [r for r in comparable if (r.get("activity_gear") or "unknown") == bike]
+            bike_rows = [r for r in comparable_cycling if (r.get("activity_gear") or "unknown") == bike]
             if not bike_rows:
                 continue
 
@@ -1206,7 +1371,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
             ]
 
             weight_text = f", {median(weights):.1f} kg" if weights else ""
-            print(f"{bike} ({activity_count} rides{weight_text})")
+            print(t("bike_activities", lang, bike=bike, count=activity_count, weight=weight_text))
             print(f"  comparable VAM: {len(bike_rows)}")
             if vam15:
                 print(f"  15m VAM median/best: {median(vam15):.0f} / {max(vam15):.0f} m/h")
@@ -1219,7 +1384,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
 
     interval_rows = [r for r in ok if r.get("interval_count")]
     print()
-    print(f"Detected interval sessions:        {len(interval_rows)}")
+    print(t("detected_intervals", lang, value=len(interval_rows)))
     if interval_rows:
         for r in interval_rows:
             date = r.get("activity_date") or "-"
@@ -1229,7 +1394,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
 
     artefacts = [r for r in with_hr if r["hr_artefact"]]
     print()
-    print(f"Activities with HR artefact flag:  {len(artefacts)}")
+    print(t("hr_artefacts", lang, value=len(artefacts)))
 
 
 def _csv_safe_training_row(row: dict) -> dict:
@@ -1280,7 +1445,7 @@ def run_training_scan(
                 error_rows.append(row)
                 print(
                     f"[{index:>4}/{len(files)}] {summary.filename} | "
-                    f"ERROR: {summary.error}"
+                    f"{t("error_prefix", args.lang)}: {summary.error}"
                 )
                 continue
 
@@ -1307,19 +1472,26 @@ def run_training_scan(
 
     if args.add_missing_metadata:
         if activities_csv is None:
-            print("Metadata update skipped: no activities.csv found", file=sys.stderr)
+            print(t("metadata_skipped", args.lang), file=sys.stderr)
         else:
             try:
                 added = append_missing_metadata_rows(activities_csv, rows, strava_metadata)
-                print(f"Metadata rows appended: {added}")
+                print(t("metadata_appended", args.lang, value=added))
                 if added:
                     # Refresh annual/season volume so the current run immediately
                     # includes the newly appended activities.
                     refreshed_metadata = load_strava_metadata(activities_csv)
                     volume = metadata_volume_summary(refreshed_metadata, args.year, args.month, args.sport)
             except (OSError, ValueError) as exc:
-                print(f"Error updating activities.csv: {exc}", file=sys.stderr)
+                print(t("metadata_update_error", args.lang, value=exc), file=sys.stderr)
                 return 2
+
+    # Volume metrics come from Strava metadata, but the activity count should
+    # describe the files actually selected by this scan. Keep selected files
+    # that later failed processing in the count.
+    if volume is not None:
+        volume = dict(volume)
+        volume["activities"] = len(files) - counts["filtered"]
 
     weekly = build_weekly_summary(rows, strava_metadata, args.year, args.month, args.sport)
     structured_summary = build_training_summary(
@@ -1330,50 +1502,49 @@ def run_training_scan(
         write_json_output(output, rows, structured_summary, args)
 
     print()
-    print(f"Supported files found: {len(files)}")
+    print(t("supported_files", args.lang, value=len(files)))
     if args.year is not None or args.sport is not None:
-        print(f"Filtered out:          {counts['filtered']}")
-    print(f"Activities processed:  {counts['ok']}")
-    print(f"With usable HR:        {sum(bool(r.get('has_hr')) for r in rows)}")
-    print(f"Without usable HR:     {sum(not bool(r.get('has_hr')) for r in rows)}")
-    print(f"Errors:                {counts['error']}")
-    print(f"{'JSON' if args.json else 'CSV'} written to:        {output}")
+        print(t("filtered_out", args.lang, value=counts["filtered"]))
+    print(t("processed_short", args.lang, value=counts["ok"]))
+    print(t("with_hr_short", args.lang, value=sum(bool(r.get("has_hr")) for r in rows)))
+    print(t("without_hr_short", args.lang, value=sum(not bool(r.get("has_hr")) for r in rows)))
+    print(t("errors_short", args.lang, value=counts["error"]))
+    print(t("written_to", args.lang, kind="JSON" if args.json else "CSV", value=output))
 
-    print_training_summary(rows + error_rows, args.year, args.month, args.sport, volume)
+    print_training_summary(rows + error_rows, args.year, args.month, args.sport, volume, lang=args.lang)
 
     return 1 if counts["error"] else 0
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    lang = detect_language()
+    args = build_parser(lang).parse_args()
+    lang = args.lang
 
     directory = args.directory.expanduser()
     output = default_output(args)
 
     if not directory.is_dir():
-        print(f"Error: not a directory: {directory}", file=sys.stderr)
+        print(t("err_not_dir", lang, value=directory), file=sys.stderr)
         return 2
 
     if args.month is not None and args.year is None:
-        print("Error: --month requires --year.", file=sys.stderr)
+        print(t("err_month_year", lang), file=sys.stderr)
         return 2
 
     if args.min_hr >= args.max_hr:
-        print("Error: --min-hr must be lower than --max-hr.", file=sys.stderr)
+        print(t("err_minmax", lang), file=sys.stderr)
         return 2
 
     if not (args.min_hr < args.hrmax < args.max_hr):
-        print(
-            "Error: --hrmax must lie between --min-hr and --max-hr.",
-            file=sys.stderr,
-        )
+        print(t("err_hrmax", lang), file=sys.stderr)
         return 2
 
     if (args.lt1 is None) != (args.lt2 is None):
-        print("Error: 3-zone reporting requires both --lt1 and --lt2 (or neither).", file=sys.stderr)
+        print(t("err_zones", lang), file=sys.stderr)
         return 2
     if args.lt1 is not None and not (args.min_hr < args.lt1 < args.lt2 < args.max_hr):
-        print("Error: require --min-hr < --lt1 < --lt2 < --max-hr.", file=sys.stderr)
+        print(t("err_threshold_order", lang), file=sys.stderr)
         return 2
 
     files = supported_files(directory)
@@ -1382,14 +1553,14 @@ def main() -> int:
     try:
         strava_metadata = load_strava_metadata(activities_csv)
     except (OSError, ValueError) as exc:
-        print(f"Error loading Strava activities.csv: {exc}", file=sys.stderr)
+        print(t("err_load_metadata", lang, value=exc), file=sys.stderr)
         return 2
 
     if activities_csv is not None:
-        print(f"Strava metadata:       {activities_csv}")
-        print(f"Metadata rows loaded:  {len(strava_metadata)}")
+        print(t("strava_metadata", lang, value=activities_csv))
+        print(t("metadata_rows", lang, value=len(strava_metadata)))
     else:
-        print("Strava metadata:       not found (bike fields will be blank)")
+        print(t("metadata_missing", lang))
 
     volume = metadata_volume_summary(strava_metadata, args.year, args.month, args.sport)
 
@@ -1401,10 +1572,10 @@ def main() -> int:
         files, matched_count, missing_count = preselect_files_from_metadata(
             directory, strava_metadata, args.year, args.month, args.sport
         )
-        print(f"CSV rows matched:      {matched_count}")
-        print(f"Matching files found:  {len(files)}")
+        print(t("csv_rows_matched", lang, value=matched_count))
+        print(t("matching_files", lang, value=len(files)))
         if missing_count:
-            print(f"CSV rows missing file: {missing_count}")
+            print(t("csv_missing_file", lang, value=missing_count))
 
     return run_training_scan(args, files, output, strava_metadata, volume, activities_csv)
 

@@ -9,7 +9,7 @@ actual humans like coaches.
 It offers the following features
 
 - heart-rate analysis across multiple durations;
-- per-ride and per-season HRmax evidence;
+- per-activity and per-season HRmax evidence;
 - cautious LT2 estimation;
 - long-duration sustained heart-rate observations;
 - hard-effort block detection, including recovery gaps;
@@ -92,17 +92,17 @@ When available, `activities.csv` is used for:
 - fast preselection by year and sport;
 - Strava activity ID;
 - activity name;
-- bike/gear name;
-- bike weight;
-- bike ID;
+- activity gear name (generic Strava gear, e.g. a bicycle or walking/running shoe);
+- bike weight for cycling activities;
+- bike ID for cycling activities;
 - athlete weight, if present;
 - annual activity count;
 - annual moving time;
 - annual distance;
 - annual elevation gain;
-- counts of long rides.
+- counts of long activities.
 
-It also allows annual volume to include rides where no usable HR trace exists.
+It also allows annual volume to include activities where no usable HR trace exists.
 
 ### Capability-based activity processing
 
@@ -119,7 +119,7 @@ has_power
 
 The current analyser uses HR, GPS and elevation where available. `has_power` is currently a placeholder for future recorded-power support.
 
-A ride without usable HR can still contribute:
+An activity without usable HR can still contribute:
 
 - distance;
 - elevation gain;
@@ -243,7 +243,7 @@ Example:
 
 This is the HRmax value used by the analysis rules for that run.
 
-The program also reports **per-ride HRmax candidates**, so a useful workflow is:
+The program also reports **per-activity HRmax candidates**, so a useful workflow is:
 
 1. make a reasonable yearly HRmax estimate;
 2. run the analysis;
@@ -321,6 +321,17 @@ In particular, alpine skiing is **not** an alias of `skiing`. Strava values such
 ```
 
 This makes the above a useful multi-sport endurance scan when walking is deliberate base exercise and lift-served alpine skiing should not contribute to the default training-volume summary.
+
+### `--lang`
+
+Console messages, validation errors and command-line help can be shown in English or French:
+
+```bash
+--lang en
+--lang fr
+```
+
+If `--lang` is omitted, the scanner uses English. Use `--lang fr` to request French console/help text explicitly. Option names, JSON keys, CSV columns and stored analytical classifications remain language-neutral/stable so scripts consuming the output are not broken by the display language.
 
 ---
 
@@ -420,7 +431,7 @@ This produces:
 
 The JSON is designed for longitudinal analysis. It contains a compact top-level season summary plus the individual activity records used to support it. Missing observations use JSON `null`; unavailable capabilities are represented explicitly by the `has_*` flags. Hard-effort blocks and their gaps remain nested arrays rather than being flattened into strings.
 
-When `--lt1` and `--lt2` are supplied, each HR-equipped activity includes two complementary three-zone views. The existing `zone1_seconds`, `zone2_seconds`, `zone3_seconds` and `zone_total_seconds` fields preserve all continuously recorded HR time. The `active_zone1_seconds`, `active_zone2_seconds`, `active_zone3_seconds` and `active_zone_total_seconds` fields count only intervals with credible movement, currently **at least 2 km/h**. The lower threshold is deliberately sport-neutral: it is low enough to retain slow uphill skiing and walking while still removing stationary periods and most GPS drift. This also prevents a device left recording at work from becoming several hours of apparent training while preserving the original HR record. The season summary additionally contains `weekly_training`, which aggregates weekly moving hours, distance, climbing, long rides, active zone time and hard-effort counts.
+When `--lt1` and `--lt2` are supplied, each HR-equipped activity includes two complementary three-zone views. The existing `zone1_seconds`, `zone2_seconds`, `zone3_seconds` and `zone_total_seconds` fields preserve all continuously recorded HR time. The `active_zone1_seconds`, `active_zone2_seconds`, `active_zone3_seconds` and `active_zone_total_seconds` fields count only intervals with credible movement, currently **at least 2 km/h**. The lower threshold is deliberately sport-neutral: it is low enough to retain slow uphill skiing and walking while still removing stationary periods and most GPS drift. This also prevents a device left recording at work from becoming several hours of apparent training while preserving the original HR record. The season summary additionally contains `weekly_training`, which aggregates weekly moving hours, an `hours_by_sport` breakdown, distance, climbing, long activities, active zone time and hard-effort counts. The overall `volume` summary also includes `hours_by_sport`, so the explicit total remains available alongside its sport components.
 
 For a May-start cross-country skiing season:
 
@@ -1094,7 +1105,7 @@ bike_weight
 bike_id
 ```
 
-The summary also reports comparable VAM by bike.
+The summary also reports comparable VAM by bike for cycling activities only. Generic `activity_gear` remains available on other sports, so a walking shoe is retained as gear but is not treated as a bicycle.
 
 This is important because VAM depends not only on fitness but also on:
 
@@ -1157,7 +1168,7 @@ Activities in Strava metadata
 Total moving time
 Total distance
 Total elevation gain
-Long rides >=3h / >=4h / >=6h
+Long activities >=3h / >=4h / >=6h
 ```
 
 This makes historical interpretation much more robust.
@@ -1301,7 +1312,7 @@ Activities in Strava metadata
 Total moving time
 Total distance
 Total elevation gain
-Long rides >=3h / >=4h / >=6h
+Long activities >=3h / >=4h / >=6h
 ```
 
 ---
@@ -1378,7 +1389,7 @@ The separate interval summary still reports only structured sessions.
 
 ## 45. Weekly training and three-zone distribution
 
-The JSON season summary contains a `weekly_training` array. Weekly volume is based on Strava moving-time metadata where available, so rides without HR still count toward training hours. Empty calendar weeks between the first and last recorded activity are retained so genuine breaks in training remain visible. Weekly `zone1_hours`, `zone2_hours`, `zone3_hours`, `hr_zone_hours` and zone percentages are based on the active-cycling zone stream, while all continuously recorded HR time remains available as `recorded_zone1_hours`, `recorded_zone2_hours`, `recorded_zone3_hours` and `recorded_hr_zone_hours`.
+The JSON season summary contains a `weekly_training` array. Weekly volume is based on Strava moving-time metadata where available, so activities without HR still count toward training hours. Empty calendar weeks between the first and last recorded activity are retained so genuine breaks in training remain visible. Each weekly entry keeps `moving_hours` as the explicit total and adds `hours_by_sport`, using the same normalized sport names as `--sport` (for example `cycling`, `skiing` and `walking`). Weekly `zone1_hours`, `zone2_hours`, `zone3_hours`, `hr_zone_hours` and zone percentages are based on the active-movement HR stream, while all continuously recorded HR time remains available as `recorded_zone1_hours`, `recorded_zone2_hours`, `recorded_zone3_hours` and `recorded_hr_zone_hours`.
 
 Each week can contain:
 
@@ -1387,6 +1398,7 @@ week_start
 iso_year / iso_week
 activities
 moving_hours
+hours_by_sport
 distance_km
 elevation_gain_m
 rides_3h
@@ -1551,7 +1563,7 @@ When comparing years, do not interpret VAM or threshold changes without consider
 - total riding hours;
 - total distance;
 - total elevation;
-- number of long rides;
+- number of long activities;
 - bike type;
 - changes in available training time;
 - injury;
@@ -1760,7 +1772,7 @@ Activities in Strava metadata:    212
 Total moving time:                170.6 h
 Total distance:                   3404 km
 Total elevation gain:             51664 m
-Long rides >=3h / >=4h / >=6h:   6 / 4 / 1
+Long activities >=3h / >=4h / >=6h:   6 / 4 / 1
 Strong LT2 observations:          2
 Moderate LT2 observations:        3
 Median strong LT2 range:           156.8-160.8 bpm
