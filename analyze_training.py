@@ -1573,6 +1573,11 @@ def summarize_intervals(groups, all_samples, hrs, threshold, classification):
     )
 
 
+def tempo_effort_label(tempo_block_count: int) -> str:
+    """Return the human-readable tempo-effort label with correct number."""
+    return "sustained tempo effort" if tempo_block_count == 1 else "sustained tempo efforts"
+
+
 def apply_tempo_context(key_effort, key_confidence, tempo_blocks):
     """
     Enrich the existing hard-effort interpretation with sustained LT1-anchored
@@ -1595,7 +1600,7 @@ def apply_tempo_context(key_effort, key_confidence, tempo_blocks):
     if any(label in key_effort for label in protected):
         return key_effort, key_confidence
 
-    tempo_label = "sustained tempo effort" if len(tempo_blocks) == 1 else "sustained tempo efforts"
+    tempo_label = tempo_effort_label(len(tempo_blocks))
 
     if key_effort == "none":
         return tempo_label, "high"
