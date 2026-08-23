@@ -60,6 +60,7 @@ MESSAGES = {
         "comparable_vam": "Comparable VAM activities:         {value}",
         "vam_by_bike": "VAM by bike (comparable activities)",
         "bike_activities": "{bike} ({count} activities{weight})",
+        "detected_tempo": "Activities with sustained tempo blocks: {value}",
         "detected_intervals": "Detected interval sessions:        {value}",
         "hr_artefacts": "Activities with HR artefact flag:  {value}",
         "metadata_skipped": "Metadata update skipped: no activities.csv found",
@@ -117,6 +118,7 @@ MESSAGES = {
         "comparable_vam": "Activités VAM comparables :         {value}",
         "vam_by_bike": "VAM par vélo (activités comparables)",
         "bike_activities": "{bike} ({count} activités{weight})",
+        "detected_tempo": "Activités avec blocs tempo soutenus : {value}",
         "detected_intervals": "Séances d'intervalles détectées :   {value}",
         "hr_artefacts": "Activités avec artefact FC signalé : {value}",
         "metadata_skipped": "Mise à jour des métadonnées ignorée : activities.csv introuvable",
@@ -220,6 +222,8 @@ TRAINING_CSV_FIELDS = [
     "hard_block_count",
     "hard_blocks",
     "hard_block_gaps",
+    "tempo_block_count",
+    "tempo_blocks",
     "interval_count",
     "interval_work_total",
     "interval_work_median",
@@ -911,6 +915,8 @@ def build_weekly_summary(
             "activities_with_active_zone_data": 0,
             "hard_blocks": 0,
             "activities_with_hard_blocks": 0,
+            "tempo_blocks": 0,
+            "activities_with_tempo_blocks": 0,
             "moving_seconds_by_sport": Counter(),
         })
         b["activities"] += 1
@@ -949,6 +955,10 @@ def build_weekly_summary(
             b["hard_blocks"] += blocks
             if blocks:
                 b["activities_with_hard_blocks"] += 1
+            tempo_blocks = int(row.get("tempo_block_count") or 0)
+            b["tempo_blocks"] += tempo_blocks
+            if tempo_blocks:
+                b["activities_with_tempo_blocks"] += 1
 
     first_week = min(buckets)
     last_week = max(buckets)
@@ -962,7 +972,8 @@ def build_weekly_summary(
             "active_zone1_seconds": 0.0, "active_zone2_seconds": 0.0,
             "active_zone3_seconds": 0.0, "active_zone_total_seconds": 0.0,
             "activities_with_zone_data": 0, "activities_with_active_zone_data": 0, "hard_blocks": 0,
-            "activities_with_hard_blocks": 0, "moving_seconds_by_sport": Counter(),
+            "activities_with_hard_blocks": 0, "tempo_blocks": 0,
+            "activities_with_tempo_blocks": 0, "moving_seconds_by_sport": Counter(),
         })
         recorded_ztotal = b["zone_total_seconds"]
         active_ztotal = b["active_zone_total_seconds"]
@@ -995,6 +1006,8 @@ def build_weekly_summary(
             "recorded_hr_zone_hours": round(recorded_ztotal/3600.0, 2) if recorded_ztotal else None,
             "hard_blocks": b["hard_blocks"],
             "activities_with_hard_blocks": b["activities_with_hard_blocks"],
+            "tempo_blocks": b["tempo_blocks"],
+            "activities_with_tempo_blocks": b["activities_with_tempo_blocks"],
         })
         cursor += timedelta(days=7)
 
@@ -1148,6 +1161,10 @@ def build_training_summary(rows: list[dict], year: int | None, month: int | None
         "hard_efforts": {
             "activities_with_hard_blocks": sum((r.get("hard_block_count") or 0) > 0 for r in with_hr),
             "total_hard_blocks": sum(int(r.get("hard_block_count") or 0) for r in with_hr),
+        },
+        "tempo_efforts": {
+            "activities_with_tempo_blocks": sum((r.get("tempo_block_count") or 0) > 0 for r in with_hr),
+            "total_tempo_blocks": sum(int(r.get("tempo_block_count") or 0) for r in with_hr),
         },
         "intervals": {
             "detected_sessions": len(interval_rows),
@@ -1382,6 +1399,10 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
             if retention:
                 print(f"  median retention: {median(retention):.1f}%")
 
+    tempo_rows = [r for r in ok if r.get("tempo_block_count")]
+    print()
+    print(t("detected_tempo", lang, value=len(tempo_rows)))
+
     interval_rows = [r for r in ok if r.get("interval_count")]
     print()
     print(t("detected_intervals", lang, value=len(interval_rows)))
@@ -1400,7 +1421,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
 def _csv_safe_training_row(row: dict) -> dict:
     """Encode nested hard-effort evidence as JSON text in the flat CSV format."""
     out = dict(row)
-    for key in ("hard_blocks", "hard_block_gaps"):
+    for key in ("hard_blocks", "hard_block_gaps", "tempo_blocks"):
         value = out.get(key)
         out[key] = json.dumps(value, ensure_ascii=False, separators=(",", ":")) if value else ""
     return out

@@ -871,6 +871,35 @@ Possible gap descriptions include terrain-aware labels such as `descent / terrai
 
 In JSON, `hard_blocks` and `hard_block_gaps` are proper nested arrays. In CSV they are stored as compact JSON text in the corresponding cells.
 
+### Sustained tempo blocks
+
+When both `--lt1` and `--lt2` are supplied, the analyser also runs a second, independent detector for sustained tempo/threshold work. This does **not** replace or alter hard blocks.
+
+The additional fields are:
+
+```text
+tempo_block_count
+tempo_blocks
+```
+
+A tempo block is anchored at or above LT1 and must last at least 15 minutes. It can bridge HR dips below LT1 for up to 3 minutes, including brief stops such as traffic lights; estimated stationary time inside one interruption is allowed up to 90 seconds. A recording/data gap longer than 90 seconds breaks the block. Excursions above LT2 remain inside the same sustained tempo block rather than splitting it. At least 75% of the complete block must be at or above LT1.
+
+Each tempo block records:
+
+```text
+start
+end
+duration_seconds
+average_hr_bpm
+max_hr_bpm
+time_above_lt1_seconds
+time_above_lt2_seconds
+above_lt1_fraction
+above_lt2_fraction
+```
+
+This deliberately gives two parallel views of a session: `hard_blocks` describe discrete work above LT2, while `tempo_blocks` describe the longer sustained effort in which those hard sections may be embedded.
+
 A ride can therefore legitimately contain:
 
 ```text
@@ -1477,6 +1506,7 @@ The one-off analyser prints more detail than the batch scanner, including:
 - best sustained HR observations;
 - VAM;
 - hard blocks;
+- sustained tempo blocks when LT1/LT2 are supplied;
 - effort grouping;
 - classification;
 - LT2 evidence;
@@ -1848,3 +1878,22 @@ classifies it as an : _endurance    supra-threshold intervals_ session lasting _
 and says it  detected : _4 hard-HR blocks_ with a _median duration of 0:08:04 @ 166.0 bpm  and a  median recovery 0:03:03 @ 136.5_ bpm and it gives the blocks as _0:08:22|0:07:47|0:07:36|0:10:06._
 
 
+
+## v26: tempo-aware top-level classification
+
+Tempo blocks now feed into `key_effort` and `classification` without changing
+hard-block or interval detection.
+
+Precedence remains conservative:
+
+- interval classifications are unchanged and take priority;
+- sustained threshold / threshold-region classifications are unchanged;
+- a qualifying tempo block with no stronger hard-effort classification becomes
+  `sustained tempo effort` (or `sustained tempo efforts`);
+- tempo plus otherwise-short hard work becomes
+  `sustained tempo effort with short hard efforts`;
+- endurance/easy rides retain their overall context, e.g.
+  `endurance ride with sustained tempo effort with short hard efforts`.
+
+This makes the summary text reflect the already-exported tempo evidence while
+keeping `tempo_blocks` and `hard_blocks` as independent detectors.

@@ -227,6 +227,28 @@ class Block:
 
 
 @dataclass
+class TempoBlock:
+    start: datetime
+    end: datetime
+    avg_hr: float
+    max_hr: int
+    time_above_lt1_s: float
+    time_above_lt2_s: float
+
+    @property
+    def duration_s(self) -> float:
+        return (self.end - self.start).total_seconds()
+
+    @property
+    def above_lt1_fraction(self) -> float:
+        return self.time_above_lt1_s / self.duration_s if self.duration_s > 0 else 0.0
+
+    @property
+    def above_lt2_fraction(self) -> float:
+        return self.time_above_lt2_s / self.duration_s if self.duration_s > 0 else 0.0
+
+
+@dataclass
 class GapInfo:
     start: datetime
     end: datetime
@@ -653,6 +675,126 @@ def detect_hard_blocks(samples, threshold, min_block_s=240, bridge_gap_s=90):
                 mean(s.heart_rate for s in raw),
                 max(s.heart_rate for s in raw),
             ))
+    return blocks
+
+
+def _gap_stationary_time(samples, start, end, min_moving_speed_kmh=2.0):
+    """Estimate stationary time in a candidate interruption when movement data exists.
+
+    Returns None when there is no usable GPS/distance evidence, so lack of movement
+    data cannot accidentally be interpreted as a stop.
+    """
+    raw = samples_between(samples, start, end)
+    if len(raw) < 2:
+        return None
+
+    has_movement_data = any(
+        (a.distance_m is not None and b.distance_m is not None)
+        or (None not in (a.lat, a.lon, b.lat, b.lon))
+        for a, b in zip(raw, raw[1:])
+    )
+    if not has_movement_data:
+        return None
+
+    stopped = 0.0
+    for a, b in zip(raw, raw[1:]):
+        dt = (b.timestamp - a.timestamp).total_seconds()
+        if not (0 < dt <= 30):
+            continue
+        speed_kmh = (segment_distance_m(a, b) / dt) * 3.6
+        if speed_kmh < min_moving_speed_kmh:
+            stopped += dt
+    return stopped
+
+
+def detect_tempo_blocks(
+    samples,
+    lt1,
+    lt2,
+    min_block_s=15*60,
+    bridge_below_lt1_s=180,
+    max_stationary_s=90,
+    max_recording_gap_s=90,
+    min_above_lt1_fraction=0.75,
+):
+    """Detect sustained efforts anchored above LT1, in parallel with hard blocks.
+
+    The detector deliberately differs from ``detect_hard_blocks``:
+    - excursions above LT2 remain part of the same sustained tempo effort;
+    - short HR dips below LT1 can be bridged for up to 3 minutes;
+    - a brief stop (traffic light, junction, etc.) can be bridged, but estimated
+      stationary time inside one interruption is capped at 90 seconds;
+    - a recording/data gap longer than 90 seconds breaks the block;
+    - a block must last at least 15 minutes and spend at least 75% of its span
+      at or above LT1.
+    """
+    if lt1 is None or lt2 is None or lt1 >= lt2 or len(samples) < 2:
+        return []
+
+    smooth = rolling_hr(samples, 30)
+    raw_blocks = []
+    start = last_above = None
+
+    previous_ts = None
+    for i, (ts, hr) in enumerate(smooth):
+        if (
+            previous_ts is not None
+            and (ts - previous_ts).total_seconds() > max_recording_gap_s
+            and start is not None
+            and last_above is not None
+        ):
+            raw_blocks.append((start, last_above))
+            start = last_above = None
+        previous_ts = ts
+
+        if hr >= lt1:
+            if start is None:
+                start = i
+            last_above = i
+            continue
+
+        if start is None or last_above is None:
+            continue
+
+        gap_start = smooth[last_above][0]
+        gap_s = (ts - gap_start).total_seconds()
+        stationary_s = _gap_stationary_time(samples, gap_start, ts)
+        too_long = gap_s > bridge_below_lt1_s
+        stopped_too_long = stationary_s is not None and stationary_s > max_stationary_s
+
+        if too_long or stopped_too_long:
+            raw_blocks.append((start, last_above))
+            start = last_above = None
+
+    if start is not None and last_above is not None:
+        raw_blocks.append((start, last_above))
+
+    blocks = []
+    for a, b in raw_blocks:
+        st = smooth[a][0]
+        en = smooth[b][0]
+        duration_s = (en - st).total_seconds()
+        if duration_s < min_block_s:
+            continue
+
+        raw = samples_between(samples, st, en)
+        if len(raw) < 2:
+            continue
+
+        above_lt1_s = time_above(raw, lt1)
+        above_lt2_s = time_above(raw, lt2)
+        if duration_s <= 0 or above_lt1_s / duration_s < min_above_lt1_fraction:
+            continue
+
+        blocks.append(TempoBlock(
+            start=st,
+            end=en,
+            avg_hr=mean(s.heart_rate for s in raw),
+            max_hr=max(s.heart_rate for s in raw),
+            time_above_lt1_s=above_lt1_s,
+            time_above_lt2_s=above_lt2_s,
+        ))
+
     return blocks
 
 
@@ -1431,6 +1573,39 @@ def summarize_intervals(groups, all_samples, hrs, threshold, classification):
     )
 
 
+def apply_tempo_context(key_effort, key_confidence, tempo_blocks):
+    """
+    Enrich the existing hard-effort interpretation with sustained LT1-anchored
+    tempo evidence. This deliberately runs *after* the established hard-block
+    classifier so interval and sustained-threshold classifications keep their
+    existing precedence and behaviour.
+    """
+    if not tempo_blocks:
+        return key_effort, key_confidence
+
+    # Do not let the parallel tempo detector overwrite clearer, higher-priority
+    # interpretations from the established hard-block logic.
+    protected = (
+        "interval",
+        "sustained threshold effort",
+        "interrupted sustained threshold effort",
+        "long tempo / sub-threshold effort",
+        "sustained high-tempo / threshold-region effort",
+    )
+    if any(label in key_effort for label in protected):
+        return key_effort, key_confidence
+
+    tempo_label = "sustained tempo effort" if len(tempo_blocks) == 1 else "sustained tempo efforts"
+
+    if key_effort == "none":
+        return tempo_label, "high"
+
+    if key_effort == "short hard efforts within ride":
+        return f"{tempo_label} with short hard efforts", "high"
+
+    return key_effort, key_confidence
+
+
 def combined_classification(overall, key_effort):
     if key_effort == "none":
         return overall
@@ -1567,6 +1742,7 @@ class ActivityAnalysis:
     active_zone_total_s: float | None
     detection_threshold: float | None
     blocks: list[Block]
+    tempo_blocks: list[TempoBlock]
     gaps: list[GapInfo]
     groups: list[EffortGroup]
     interval_summary: IntervalSummary | None
@@ -1696,6 +1872,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
             active_zone1_s=None, active_zone2_s=None, active_zone3_s=None, active_zone_total_s=None,
             detection_threshold=None,
             blocks=[],
+            tempo_blocks=[],
             gaps=[],
             groups=[],
             interval_summary=None,
@@ -1756,6 +1933,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
 
     detection_threshold = lt2 if lt2 is not None else 0.85*hrmax
     blocks = detect_hard_blocks(hrs, detection_threshold)
+    tempo_blocks = detect_tempo_blocks(hrs, lt1, lt2)
     groups, gaps = build_effort_groups(blocks, all_samples, hrs, detection_threshold)
 
     t85 = time_above(hrs, 0.85*hrmax)
@@ -1767,6 +1945,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
 
     overall = overall_ride_character(duration, avg_hr, hrmax)
     key_effort, key_conf = classify_key_effort(groups, gaps, hrmax, lt2)
+    key_effort, key_conf = apply_tempo_context(key_effort, key_conf, tempo_blocks)
     primary = combined_classification(overall, key_effort)
     interval_summary = summarize_intervals(
         groups, all_samples, hrs, detection_threshold, primary
@@ -1822,6 +2001,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         active_zone1_s=active_zone1_s, active_zone2_s=active_zone2_s, active_zone3_s=active_zone3_s, active_zone_total_s=active_zone_total_s,
         detection_threshold=detection_threshold,
         blocks=blocks,
+        tempo_blocks=tempo_blocks,
         gaps=gaps,
         groups=groups,
         interval_summary=interval_summary,
@@ -1947,6 +2127,17 @@ def print_analysis(a: ActivityAnalysis):
     else:
         print("none")
 
+    if a.tempo_blocks:
+        print()
+        print("Sustained tempo blocks (anchored >=LT1):")
+        for i, b in enumerate(a.tempo_blocks, 1):
+            print(
+                f"{i:>2}. {fmt_time(b.duration_s):>7}  "
+                f"avg {b.avg_hr:5.1f}  max {b.max_hr}  "
+                f">=LT1 {100*b.above_lt1_fraction:4.1f}%  "
+                f">=LT2 {100*b.above_lt2_fraction:4.1f}%"
+            )
+
     if a.gaps:
         print()
         print("Gaps between HR blocks:")
@@ -1983,7 +2174,7 @@ def print_analysis(a: ActivityAnalysis):
             pct = 100.0 * seconds / a.zone_total_s if seconds is not None else 0.0
             print(f"{label + ':':17} {fmt_time(seconds):>8}  ({pct:4.1f}%)")
         if a.active_zone_total_s is not None and a.active_zone_total_s > 0:
-            print("3-zone HR model (active cycling >=2 km/h):")
+            print("3-zone HR model (active movement >=2 km/h):")
             for label, seconds in (("Zone 1", a.active_zone1_s), ("Zone 2", a.active_zone2_s), ("Zone 3", a.active_zone3_s)):
                 pct = 100.0 * seconds / a.active_zone_total_s if seconds is not None else 0.0
                 print(f"{label + ':':17} {fmt_time(seconds):>8}  ({pct:4.1f}%)")
