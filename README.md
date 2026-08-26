@@ -1,17 +1,31 @@
 # Training Analysis
 
-A toolkit for data mining historical fitness activity written in
-Python. Basically you can export all of your Strava activities
-and let this script analyze them. The output can be loaded into an AI to
-get insights and advice about training or can be used by
-actual humans like coaches.
+# Introduction
+
+Many of us have years of data stored up in Strava or other fitness tracking
+applications. Locked up in that data is information about training
+regimes, volume, periodicity, maximum heart rate (HRmax) and ventilatory
+thresholds used to calculate training zones. This tool unlocks that information,
+and more.
+
+# What it does
+
+This is a toolkit for data mining historical fitness activities in gpx,
+tcx and fit formats. It is written in
+Python. Basically you can export all of your Strava or other activities
+and let this script analyze them.
+
+The output is desgined to be loaded into an  AI (LLM) to
+get insights and advice about training but it can also be read directly
+by  actual humans like coaches.
 
 It offers the following features
 
 - heart-rate analysis across multiple durations;
+- threshold-based HR Intensity and HR Load;
 - per-activity and per-season HRmax evidence;
-- cautious LT2 estimation;
-- long-duration sustained heart-rate observations;
+- cautious LT2/VT2 estimation;
+- long-duration sustained heart-rate observations (LT1/VT1);
 - hard-effort block detection, including recovery gaps;
 - climbing performance using VAM;
 - analysis of activities even when no usable HR trace is present;
@@ -66,8 +80,11 @@ The scanner understands:
 .fit.gz
 ```
 
-Files are scanned from the **single directory supplied on the command line**. The scanner is not recursive. It can
-work directly with Strava batch exports.
+Files are scanned from the **single directory supplied on the command 
+line**. The scanner is not recursive. It can
+work directly with Strava batch exports. For other fitness data export
+in the same format, it can recreate the activities.csv file from the
+fitness data.
 
 Example:
 
@@ -85,11 +102,11 @@ Strava/
 
 ## 3. Strava `activities.csv`
 
-The scanner can run without `activities.csv`, but it is strongly recommended.
+The scanner can run without `activities.csv`, but it is  recommended.
 
 When available, `activities.csv` is used for:
 
-- fast preselection by year and sport;
+- faster analysis by year and sport;
 - Strava activity ID;
 - activity name;
 - activity gear name (generic Strava gear, e.g. a bicycle or walking/running shoe);
@@ -117,7 +134,8 @@ has_gps
 has_power
 ```
 
-The current analyser uses HR, GPS and elevation where available. `has_power` is currently a placeholder for future recorded-power support.
+The current analyser uses HR, GPS and elevation where available. 
+`has_power` is currently a placeholder for future recorded-power support.
 
 An activity without usable HR can still contribute:
 
@@ -251,7 +269,10 @@ The program also reports **per-activity HRmax candidates**, so a useful workflow
 4. revise the yearly HRmax if appropriate;
 5. rerun the year.
 
-The software does **not** silently replace the supplied HRmax.
+The software does **not** silently replace the supplied HRmax. Remember
+that HRmax will decline with age so you will want to analyse each training
+year, identify HRmax candidates and rerun with the correct HRmax to 
+perform a more accurate analysis.
 
 ---
 
@@ -280,6 +301,10 @@ also work on systems using a French locale.
 ### `--month`
 
 Optional season-start month (1–12). It requires `--year`. For example `--year 2025 --month 5` analyses May 2025 through April 2026.
+
+This is useful for sports where the training cycle is not linked to a calendar
+year such as Cross Country Skiing where the cycle typically begins a month after
+the end of the race season, ie. May.
 
 ---
 
@@ -337,7 +362,8 @@ If `--lang` is omitted, the scanner uses English. Use `--lang fr` to request Fre
 
 ### `--lt1` and `--lt2`
 
-Optional known lactate-threshold heart rates. When both are supplied, the analyser reports time in a simple three-zone model:
+Optional known lactate-threshold heart rates. When both are supplied,
+the analyser reports time in zone (TIZ) using a simple three-zone model:
 
 ```text
 Zone 1: HR < LT1
@@ -357,6 +383,12 @@ Zone reporting requires both thresholds. If they are omitted, zone fields remain
 
 `--lt2` also continues to help the existing effort-classification logic when supplied.
 
+The analyzer can suggest LT1 and LT2 values from current rides. You need
+1 or more hard 1 hour plus rides to get an LT2 value and 1 or more hard 4
+hour plus rides to get an LT1 candidate. You can then reanalyze using these
+values. As a suggestion you can run the analyzer with a estimate of HRmax. Feed
+all the data into an AI and get it to suggest HRmax, LT1 and LT2 values for
+each year. Then rerun the entire analysis.
 ---
 
 ### `--min-hr`
@@ -838,6 +870,8 @@ This distinction matters for outdoor training. A hilly ride may contain several 
 Every HR-enabled activity now includes:
 
 ```text
+hr_intensity
+hr_load
 hard_block_threshold_bpm
 hard_block_count
 hard_blocks
@@ -928,6 +962,98 @@ interval_summary
 ```
 
 These remain **HR-detected** work/recovery periods rather than exact prescribed or lap durations. Heart rate rises and falls with a delay after workload changes, so a real 8-minute interval may appear as somewhat less than eight minutes above the detection threshold. The software reports what the HR trace supports rather than inventing exact workout timing.
+
+---
+
+# HR Intensity and HR Load
+
+## Generic threshold-based load model
+
+When `--lt1` and `--lt2` are supplied, the analyser calculates two additional
+ride-level metrics:
+
+```text
+hr_intensity
+hr_load
+```
+
+They are deliberately named **HR Intensity** and **HR Load** rather than using
+power-specific or proprietary training-load terminology.
+
+The model uses the athlete's supplied `--lt1`, `--lt2` and `--hrmax`. The lower
+anchor is the existing `--min-hr` value, whose default is 50 bpm. The same
+curve therefore works for different athletes without hard-coding any particular
+heart-rate values.
+
+The per-sample weighting curve is continuous and changes slope at LT1 and LT2.
+Its generic reference weights are:
+
+```text
+w(min_hr) = 0
+w(LT1)    = 1.0
+w(LT2)    = 2.75
+w(HRmax)  = 9.0
+```
+
+Below LT1 the weight rises gently using a power curve with exponent 1.5:
+
+```text
+w(HR) = ((HR - min_hr) / (LT1 - min_hr)) ^ 1.5
+```
+
+Between LT1 and LT2 it rises exponentially while remaining continuous:
+
+```text
+w(HR) = exp(ln(2.75) * (HR - LT1) / (LT2 - LT1))
+```
+
+Above LT2 it rises more steeply towards the HRmax anchor:
+
+```text
+w(HR) = 2.75 * exp(ln(9 / 2.75) * (HR - LT2) / (HRmax - LT2))
+```
+
+Accepted HR values above the supplied HRmax are capped at HRmax for this
+calculation so a single anomalous sample cannot make the load explode.
+
+### HR Intensity
+
+`hr_intensity` is the time-weighted average HR weight divided by the LT2
+reference weight. Therefore:
+
+```text
+HR Intensity = 1.0
+```
+
+means that the activity's average weighted cardiovascular intensity was equal
+to the model weight at LT2. This is an HR-specific metric; it is not power IF.
+
+### HR Load
+
+`hr_load` integrates the same weights over time and is normalized so:
+
+```text
+1 hour continuously at LT2 = 100 HR Load
+```
+
+The calculation is:
+
+```text
+HR Load = 100 * sum(weight * dt) / (2.75 * 3600)
+```
+
+There is deliberately **no second squaring step**. The non-linear physiological
+weighting has already been applied to each HR sample.
+
+Where GPS movement is available, the calculation counts continuous cleaned HR
+intervals moving at least 2 km/h, matching the active-movement philosophy used
+by zone reporting. When GPS is unavailable, continuous valid HR intervals are
+used so indoor and non-GPS activities are not automatically assigned zero load.
+Recording gaps longer than 10 seconds are excluded.
+
+HR Load is also summed in the weekly JSON summary. It should be interpreted as
+a transparent comparative training-load index, not as a direct measurement of
+metabolic work, recovery requirement or mechanical power.
 
 ---
 
@@ -1287,6 +1413,8 @@ vam_comparison
 ```text
 time_85pct_seconds
 time_90pct_seconds
+hr_intensity
+hr_load
 hard_block_threshold_bpm
 hard_block_count
 hard_blocks
@@ -1435,6 +1563,8 @@ activities_with_zone_data
 zone1_hours / zone2_hours / zone3_hours
 hr_zone_hours
 zone1_pct / zone2_pct / zone3_pct
+hr_load
+activities_with_hr_load
 hard_blocks
 activities_with_hard_blocks
 moving_hours_4wk
@@ -1897,3 +2027,30 @@ Precedence remains conservative:
 
 This makes the summary text reflect the already-exported tempo evidence while
 keeping `tempo_blocks` and `hard_blocks` as independent detectors.
+
+## v28: distinguish sustained tempo from sustained hard efforts
+
+Top-level interpretation now uses the composition of each sustained LT1-anchored
+block without changing the underlying tempo-block or hard-block detectors.
+
+- if less than 50% of a sustained block is above LT2, it remains a `sustained tempo effort`;
+- if at least 50% of the block is above LT2, it is described as a `sustained hard effort`;
+- mixed multi-block rides can be described as `sustained tempo and hard efforts`;
+- singular/plural wording continues to follow the number of relevant blocks;
+- when a predominantly-above-LT2 sustained block already represents the detected hard work,
+  the classifier does not append the redundant phrase `with short hard efforts`;
+- interval and existing sustained-threshold classifications retain precedence.
+
+This is an interpretation-layer change only. Detection thresholds, hard blocks,
+tempo blocks, LT2 estimation and interval detection are unchanged.
+
+
+## v29: HR Intensity and HR Load
+
+v29 adds generic threshold-based `hr_intensity` and `hr_load` metrics. The
+weighting curve is continuous at LT1 and LT2, uses `--min-hr` (default 50 bpm)
+as its lower anchor, and uses fixed generic reference weights of 1.0 at LT1,
+2.75 at LT2 and 9.0 at HRmax. HR Load is normalized so one hour at LT2 equals
+100. The already non-linear HR weighting is integrated directly; it is not
+squared a second time. Weekly JSON output includes summed HR Load and a count of
+activities contributing HR Load.

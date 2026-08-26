@@ -806,6 +806,78 @@ def time_above(samples, threshold):
             total += dt
     return total
 
+
+
+def heart_rate_weight(hr, min_hr, lt1, lt2, hrmax, p0=1.5, lt2_weight=2.75, hrmax_weight=9.0):
+    """Return the generic threshold-anchored HR weighting for one sample.
+
+    The curve is continuous and deliberately changes slope at LT1 and LT2:
+    * min_hr -> LT1: gentle power curve, with w(min_hr)=0 and w(LT1)=1
+    * LT1 -> LT2: moderate exponential, ending at w(LT2)=2.75
+    * LT2 -> HRmax: steeper exponential, ending at w(HRmax)=9.0
+
+    Values above the supplied HRmax are capped at HRmax so an erroneous or
+    unusually high sample cannot make the load explode.
+    """
+    if lt1 is None or lt2 is None:
+        return None
+    if not (min_hr < lt1 < lt2 < hrmax):
+        return None
+
+    h = min(max(float(hr), float(min_hr)), float(hrmax))
+    if h < lt1:
+        x = (h - min_hr) / (lt1 - min_hr)
+        return x ** p0
+    if h < lt2:
+        k1 = math.log(lt2_weight)
+        x = (h - lt1) / (lt2 - lt1)
+        return math.exp(k1 * x)
+
+    k2 = math.log(hrmax_weight / lt2_weight)
+    x = (h - lt2) / (hrmax - lt2)
+    return lt2_weight * math.exp(k2 * x)
+
+
+def heart_rate_load(samples, min_hr, lt1, lt2, hrmax, min_active_speed_kmh=2.0, has_gps=True):
+    """Return (HR Intensity, HR Load) from cleaned HR samples.
+
+    HR Intensity is the time-weighted mean HR weight divided by the LT2
+    reference weight (2.75), so 1.0 represents the weighted intensity of
+    sitting at LT2. HR Load integrates the same weights and is normalised so
+    one hour at LT2 equals 100. There is deliberately no second squaring step.
+
+    When GPS is available, only intervals moving at >=2 km/h count. Without
+    GPS, continuous valid HR intervals are retained so indoor/non-GPS
+    activities can still receive a load. Recording gaps longer than 10 s are
+    excluded, matching the existing zone-time treatment.
+    """
+    if lt1 is None or lt2 is None or not (min_hr < lt1 < lt2 < hrmax):
+        return None, None
+
+    weighted_seconds = 0.0
+    counted_seconds = 0.0
+    lt2_weight = 2.75
+    for a, b in zip(samples, samples[1:]):
+        dt = (b.timestamp - a.timestamp).total_seconds()
+        if not (0 < dt <= 10):
+            continue
+        if has_gps:
+            d = segment_distance_m(a, b)
+            speed_kmh = (d / dt) * 3.6 if dt > 0 else 0.0
+            if speed_kmh < min_active_speed_kmh:
+                continue
+        weight = heart_rate_weight(a.heart_rate, min_hr, lt1, lt2, hrmax)
+        if weight is None:
+            continue
+        weighted_seconds += weight * dt
+        counted_seconds += dt
+
+    if counted_seconds <= 0:
+        return None, None
+    intensity = (weighted_seconds / counted_seconds) / lt2_weight
+    load = 100.0 * weighted_seconds / (lt2_weight * 3600.0)
+    return intensity, load
+
 def time_in_three_zones(samples, lt1, lt2, active_only=False, min_active_speed_kmh=2.0):
     """Return seconds in a 3-zone HR model using cleaned HR samples.
 
@@ -1573,23 +1645,40 @@ def summarize_intervals(groups, all_samples, hrs, threshold, classification):
     )
 
 
-def tempo_effort_label(tempo_block_count: int) -> str:
-    """Return the human-readable tempo-effort label with correct number."""
-    return "sustained tempo effort" if tempo_block_count == 1 else "sustained tempo efforts"
+def sustained_effort_label(tempo_blocks, hard_fraction: float = 0.50) -> str:
+    """
+    Describe LT1-anchored sustained blocks by their HR composition.
+
+    The detector remains deliberately broad: a tempo block may include work
+    above LT2.  For interpretation only, a block with at least ``hard_fraction``
+    of its duration above LT2 is treated as a sustained hard effort rather than
+    a tempo effort.
+    """
+    hard_like = [
+        block for block in tempo_blocks
+        if block.above_lt2_fraction >= hard_fraction
+    ]
+    tempo_like_count = len(tempo_blocks) - len(hard_like)
+
+    if hard_like and tempo_like_count:
+        return "sustained tempo and hard efforts"
+    if hard_like:
+        return "sustained hard effort" if len(hard_like) == 1 else "sustained hard efforts"
+    return "sustained tempo effort" if len(tempo_blocks) == 1 else "sustained tempo efforts"
 
 
 def apply_tempo_context(key_effort, key_confidence, tempo_blocks):
     """
     Enrich the existing hard-effort interpretation with sustained LT1-anchored
-    tempo evidence. This deliberately runs *after* the established hard-block
+    block evidence. This deliberately runs *after* the established hard-block
     classifier so interval and sustained-threshold classifications keep their
     existing precedence and behaviour.
     """
     if not tempo_blocks:
         return key_effort, key_confidence
 
-    # Do not let the parallel tempo detector overwrite clearer, higher-priority
-    # interpretations from the established hard-block logic.
+    # Do not let the parallel sustained-block detector overwrite clearer,
+    # higher-priority interpretations from the established hard-block logic.
     protected = (
         "interval",
         "sustained threshold effort",
@@ -1600,13 +1689,19 @@ def apply_tempo_context(key_effort, key_confidence, tempo_blocks):
     if any(label in key_effort for label in protected):
         return key_effort, key_confidence
 
-    tempo_label = tempo_effort_label(len(tempo_blocks))
+    sustained_label = sustained_effort_label(tempo_blocks)
+    contains_hard_sustained = "hard effort" in sustained_label
 
     if key_effort == "none":
-        return tempo_label, "high"
+        return sustained_label, "high"
 
     if key_effort == "short hard efforts within ride":
-        return f"{tempo_label} with short hard efforts", "high"
+        # If the sustained block itself is predominantly above LT2, the hard
+        # block is already represented by the stronger sustained-hard label.
+        # Avoid the redundant "hard effort with short hard efforts" wording.
+        if contains_hard_sustained:
+            return sustained_label, "high"
+        return f"{sustained_label} with short hard efforts", "high"
 
     return key_effort, key_confidence
 
@@ -1745,6 +1840,8 @@ class ActivityAnalysis:
     active_zone2_s: float | None
     active_zone3_s: float | None
     active_zone_total_s: float | None
+    hr_intensity: float | None
+    hr_load: float | None
     detection_threshold: float | None
     blocks: list[Block]
     tempo_blocks: list[TempoBlock]
@@ -1875,6 +1972,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
             time90_s=None,
             zone1_s=None, zone2_s=None, zone3_s=None, zone_total_s=None,
             active_zone1_s=None, active_zone2_s=None, active_zone3_s=None, active_zone_total_s=None,
+            hr_intensity=None, hr_load=None,
             detection_threshold=None,
             blocks=[],
             tempo_blocks=[],
@@ -1947,6 +2045,9 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
     active_zone1_s, active_zone2_s, active_zone3_s, active_zone_total_s = time_in_three_zones(
         hrs, lt1, lt2, active_only=True
     )
+    hr_intensity, hr_load = heart_rate_load(
+        hrs, min_hr=min_hr, lt1=lt1, lt2=lt2, hrmax=hrmax, has_gps=has_gps
+    )
 
     overall = overall_ride_character(duration, avg_hr, hrmax)
     key_effort, key_conf = classify_key_effort(groups, gaps, hrmax, lt2)
@@ -2004,6 +2105,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         time90_s=t90,
         zone1_s=zone1_s, zone2_s=zone2_s, zone3_s=zone3_s, zone_total_s=zone_total_s,
         active_zone1_s=active_zone1_s, active_zone2_s=active_zone2_s, active_zone3_s=active_zone3_s, active_zone_total_s=active_zone_total_s,
+        hr_intensity=hr_intensity, hr_load=hr_load,
         detection_threshold=detection_threshold,
         blocks=blocks,
         tempo_blocks=tempo_blocks,
@@ -2131,6 +2233,10 @@ def print_analysis(a: ActivityAnalysis):
             )
     else:
         print("none")
+
+    if a.hr_intensity is not None and a.hr_load is not None:
+        print(f"HR Intensity:     {a.hr_intensity:.3f}")
+        print(f"HR Load:          {a.hr_load:.1f}")
 
     if a.tempo_blocks:
         print()

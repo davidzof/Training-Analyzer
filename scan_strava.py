@@ -212,6 +212,8 @@ TRAINING_CSV_FIELDS = [
     "active_zone2_seconds",
     "active_zone3_seconds",
     "active_zone_total_seconds",
+    "hr_intensity",
+    "hr_load",
     "active_zone1_pct",
     "active_zone2_pct",
     "active_zone3_pct",
@@ -913,6 +915,8 @@ def build_weekly_summary(
             "active_zone_total_seconds": 0.0,
             "activities_with_zone_data": 0,
             "activities_with_active_zone_data": 0,
+            "hr_load": 0.0,
+            "activities_with_hr_load": 0,
             "hard_blocks": 0,
             "activities_with_hard_blocks": 0,
             "tempo_blocks": 0,
@@ -951,6 +955,9 @@ def build_weekly_summary(
             for field in ("active_zone1_seconds", "active_zone2_seconds", "active_zone3_seconds", "active_zone_total_seconds"):
                 b[field] += float(row.get(field) or 0.0)
         if row is not None:
+            if row.get("hr_load") is not None:
+                b["hr_load"] += float(row["hr_load"])
+                b["activities_with_hr_load"] += 1
             blocks = int(row.get("hard_block_count") or 0)
             b["hard_blocks"] += blocks
             if blocks:
@@ -971,7 +978,8 @@ def build_weekly_summary(
             "zone2_seconds": 0.0, "zone3_seconds": 0.0, "zone_total_seconds": 0.0,
             "active_zone1_seconds": 0.0, "active_zone2_seconds": 0.0,
             "active_zone3_seconds": 0.0, "active_zone_total_seconds": 0.0,
-            "activities_with_zone_data": 0, "activities_with_active_zone_data": 0, "hard_blocks": 0,
+            "activities_with_zone_data": 0, "activities_with_active_zone_data": 0, "hr_load": 0.0,
+            "activities_with_hr_load": 0, "hard_blocks": 0,
             "activities_with_hard_blocks": 0, "tempo_blocks": 0,
             "activities_with_tempo_blocks": 0, "moving_seconds_by_sport": Counter(),
         })
@@ -1004,6 +1012,8 @@ def build_weekly_summary(
             "recorded_zone2_hours": round(b["zone2_seconds"]/3600.0, 2) if recorded_ztotal else None,
             "recorded_zone3_hours": round(b["zone3_seconds"]/3600.0, 2) if recorded_ztotal else None,
             "recorded_hr_zone_hours": round(recorded_ztotal/3600.0, 2) if recorded_ztotal else None,
+            "hr_load": round(b["hr_load"], 1) if b["activities_with_hr_load"] else None,
+            "activities_with_hr_load": b["activities_with_hr_load"],
             "hard_blocks": b["hard_blocks"],
             "activities_with_hard_blocks": b["activities_with_hard_blocks"],
             "tempo_blocks": b["tempo_blocks"],
@@ -1158,6 +1168,10 @@ def build_training_summary(rows: list[dict], year: int | None, month: int | None
             "median_retention_pct": median(retention) if retention else None,
             "by_bike": bikes,
         },
+        "hr_load": {
+            "activities_with_hr_load": sum(r.get("hr_load") is not None for r in with_hr),
+            "total_hr_load": round(sum(float(r.get("hr_load") or 0.0) for r in with_hr), 1),
+        },
         "hard_efforts": {
             "activities_with_hard_blocks": sum((r.get("hard_block_count") or 0) > 0 for r in with_hr),
             "total_hard_blocks": sum(int(r.get("hard_block_count") or 0) for r in with_hr),
@@ -1180,7 +1194,8 @@ def write_json_output(
     args,
 ) -> None:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "project_version": 29,
         "generated_by": "training-analyser",
         "analysis_parameters": {
             "hrmax_bpm": args.hrmax,
@@ -1188,6 +1203,13 @@ def write_json_output(
             "lt2_bpm": args.lt2,
             "min_hr_bpm": args.min_hr,
             "max_hr_bpm": args.max_hr,
+            "hr_load_model": {
+                "lt1_weight": 1.0,
+                "lt2_weight": 2.75,
+                "hrmax_weight": 9.0,
+                "below_lt1_exponent": 1.5,
+                "normalization": "100 load = 1 hour at LT2"
+            },
         },
         "summary": summary,
         "activities": rows,
@@ -1398,6 +1420,11 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
                 print(f"  60m VAM median/best: {median(vam60):.0f} / {max(vam60):.0f} m/h")
             if retention:
                 print(f"  median retention: {median(retention):.1f}%")
+
+    load_rows = [r for r in with_hr if r.get("hr_load") is not None]
+    if load_rows:
+        print(f"Total HR Load:                       {sum(float(r['hr_load']) for r in load_rows):.1f}")
+        print(f"Activities with HR Load:             {len(load_rows)}")
 
     tempo_rows = [r for r in ok if r.get("tempo_block_count")]
     print()

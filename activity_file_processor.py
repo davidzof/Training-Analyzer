@@ -414,6 +414,8 @@ class TrainingSummary:
     active_zone2_seconds: float | None
     active_zone3_seconds: float | None
     active_zone_total_seconds: float | None
+    hr_intensity: float | None
+    hr_load: float | None
     active_zone1_pct: float | None
     active_zone2_pct: float | None
     active_zone3_pct: float | None
@@ -587,7 +589,7 @@ def process_training_file(
             best_4h_hr_p90=None,
             vam_15=None, vam_30=None, vam_60=None, vam_retention_pct=None,
             vam_comparison=None, time_85pct_seconds=None,
-            time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
+            time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, hr_intensity=None, hr_load=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
             hard_blocks=[], hard_block_gaps=[], tempo_block_count=0, tempo_blocks=[], interval_count=None, interval_work_total=None,
             interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
@@ -653,6 +655,8 @@ def process_training_file(
             active_zone2_seconds=round(result.active_zone2_s, 1) if result.active_zone2_s is not None else None,
             active_zone3_seconds=round(result.active_zone3_s, 1) if result.active_zone3_s is not None else None,
             active_zone_total_seconds=round(result.active_zone_total_s, 1) if result.active_zone_total_s is not None else None,
+            hr_intensity=round(result.hr_intensity, 4) if result.hr_intensity is not None else None,
+            hr_load=round(result.hr_load, 1) if result.hr_load is not None else None,
             active_zone1_pct=round(100.0*result.active_zone1_s/result.active_zone_total_s, 1) if result.active_zone_total_s else None,
             active_zone2_pct=round(100.0*result.active_zone2_s/result.active_zone_total_s, 1) if result.active_zone_total_s else None,
             active_zone3_pct=round(100.0*result.active_zone3_s/result.active_zone_total_s, 1) if result.active_zone_total_s else None,
@@ -709,7 +713,7 @@ def process_training_file(
             best_4h_hr_p90=None,
             vam_15=None, vam_30=None, vam_60=None, vam_retention_pct=None,
             vam_comparison=None, time_85pct_seconds=None,
-            time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
+            time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, hr_intensity=None, hr_load=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
             hard_blocks=[], hard_block_gaps=[], tempo_block_count=0, tempo_blocks=[], interval_count=None, interval_work_total=None,
             interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
