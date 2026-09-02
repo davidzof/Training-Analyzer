@@ -212,6 +212,7 @@ class Sample:
     lat: float | None = None
     lon: float | None = None
     distance_m: float | None = None
+    cadence_rpm: float | None = None
 
 
 @dataclass
@@ -220,6 +221,7 @@ class Block:
     end: datetime
     avg_hr: float
     max_hr: int
+    avg_cadence_rpm: float | None = None
 
     @property
     def duration_s(self) -> float:
@@ -282,12 +284,14 @@ class IntervalSummary:
     work_durations_s: list[float]
     work_avg_hrs: list[float]
     work_max_hrs: list[int]
+    work_avg_cadences_rpm: list[float | None]
     recovery_durations_s: list[float]
     recovery_avg_hrs: list[float | None]
     work_total_s: float
     work_median_s: float
     work_avg_hr: float
     work_max_hr: int
+    work_avg_cadence_rpm: float | None
     recovery_median_s: float | None
     recovery_avg_hr: float | None
 
@@ -424,6 +428,7 @@ def parse_gpx(path: Path, compressed: bool):
         timestamp = None
         elevation = None
         heart_rate = None
+        cadence_rpm = None
 
         for child in element.iter():
             cname = local_name(child.tag)
@@ -443,9 +448,14 @@ def parse_gpx(path: Path, compressed: bool):
                     heart_rate = int(round(float(child.text.strip())))
                 except ValueError:
                     pass
+            elif cname in {"cad", "cadence"} and child.text:
+                try:
+                    cadence_rpm = float(child.text.strip())
+                except ValueError:
+                    pass
 
         if timestamp is not None:
-            samples.append(Sample(timestamp, heart_rate, elevation, lat, lon, None))
+            samples.append(Sample(timestamp, heart_rate, elevation, lat, lon, None, cadence_rpm))
 
     return activity_type, sorted(samples, key=lambda s: s.timestamp)
 
@@ -466,7 +476,7 @@ def parse_tcx(path: Path, compressed: bool):
         if name != "trackpoint":
             continue
 
-        timestamp = elevation = distance_m = lat = lon = heart_rate = None
+        timestamp = elevation = distance_m = lat = lon = heart_rate = cadence_rpm = None
 
         for child in element.iter():
             cname = local_name(child.tag)
@@ -504,10 +514,15 @@ def parse_tcx(path: Path, compressed: bool):
                         except ValueError:
                             pass
                         break
+            elif cname in {"cadence", "runcadence"} and child.text:
+                try:
+                    cadence_rpm = float(child.text.strip())
+                except ValueError:
+                    pass
 
         if timestamp is not None:
             samples.append(Sample(
-                timestamp, heart_rate, elevation, lat, lon, distance_m
+                timestamp, heart_rate, elevation, lat, lon, distance_m, cadence_rpm
             ))
 
     return activity_type, sorted(samples, key=lambda s: s.timestamp)
@@ -546,6 +561,7 @@ def parse_fit(path: Path, compressed: bool):
         if elev is None:
             elev = msg.get_value("altitude")
         dist = msg.get_value("distance")
+        cadence_rpm = msg.get_value("cadence")
 
         lat_raw = msg.get_value("position_lat")
         lon_raw = msg.get_value("position_long")
@@ -563,12 +579,16 @@ def parse_fit(path: Path, compressed: bool):
         except (TypeError, ValueError):
             dist = None
         try:
+            cadence_rpm = float(cadence_rpm) if cadence_rpm is not None else None
+        except (TypeError, ValueError):
+            cadence_rpm = None
+        try:
             lat = semicircles_to_degrees(lat_raw) if lat_raw is not None else None
             lon = semicircles_to_degrees(lon_raw) if lon_raw is not None else None
         except (TypeError, ValueError):
             lat = lon = None
 
-        samples.append(Sample(ts, hr, elev, lat, lon, dist))
+        samples.append(Sample(ts, hr, elev, lat, lon, dist, cadence_rpm))
 
     return activity_type, sorted(samples, key=lambda s: s.timestamp)
 
@@ -587,6 +607,17 @@ def read_samples(path: Path):
 # ---------------------------------------------------------------------------
 # Basic HR analysis
 # ---------------------------------------------------------------------------
+
+
+def average_recorded_cadence(samples: list[Sample]) -> float | None:
+    """Average positive recorded cadence samples when cadence is available."""
+    values = [
+        float(sample.cadence_rpm)
+        for sample in samples
+        if sample.cadence_rpm is not None and 0 < float(sample.cadence_rpm) < 300
+    ]
+    return mean(values) if values else None
+
 
 def hr_samples(samples, min_hr, max_hr):
     return [
@@ -643,12 +674,27 @@ def rolling_hr(samples, window_s=30):
     return out
 
 
-def detect_hard_blocks(samples, threshold, min_block_s=240, bridge_gap_s=90):
+def detect_hard_blocks(
+    samples, threshold, min_block_s=240, bridge_gap_s=90, max_recording_gap_s=90
+):
     smooth = rolling_hr(samples, 30)
     raw_blocks = []
     start = last_above = None
+    previous_ts = None
 
     for i, (ts, hr) in enumerate(smooth):
+        # A genuine recording/data gap must never be bridged merely because
+        # the first HR sample after the gap is still above threshold.
+        if (
+            previous_ts is not None
+            and (ts - previous_ts).total_seconds() > max_recording_gap_s
+            and start is not None
+            and last_above is not None
+        ):
+            raw_blocks.append((start, last_above))
+            start = last_above = None
+        previous_ts = ts
+
         if hr >= threshold:
             if start is None:
                 start = i
@@ -674,6 +720,7 @@ def detect_hard_blocks(samples, threshold, min_block_s=240, bridge_gap_s=90):
                 st, en,
                 mean(s.heart_rate for s in raw),
                 max(s.heart_rate for s in raw),
+                average_recorded_cadence(raw),
             ))
     return blocks
 
@@ -1084,6 +1131,26 @@ def suspicious_descent_hr(all_samples, hrs, hrmax):
             and a.elevation is not None and b.elevation is not None
             and b.elevation < a.elevation-0.5
         ):
+            # High HR during a descent is not itself evidence of a sensor
+            # artefact. A rider can deliberately keep working through a short
+            # downhill. Only flag the sample when the high HR is not already
+            # supported by the immediately preceding HR trace. This preserves
+            # the historical descent-spike detector while avoiding deletion of
+            # physiologically continuous hard efforts.
+            recent_hr = []
+            j = i - 1
+            while j >= 0:
+                prev = all_samples[j]
+                age_s = (b.timestamp - prev.timestamp).total_seconds()
+                if age_s > 30:
+                    break
+                if prev.heart_rate is not None:
+                    recent_hr.append(prev.heart_rate)
+                j -= 1
+
+            if recent_hr and median(recent_hr) >= b.heart_rate - 10:
+                continue
+
             flags.append(b)
 
     return flags
@@ -1587,6 +1654,16 @@ def classify_key_effort(groups, gaps, hrmax, lt2):
     return "short hard efforts within ride", "medium"
 
 
+def average_effort_group_cadence(group, all_samples):
+    """Average positive recorded cadence across the hard-work blocks in one effort group."""
+    values = []
+    for block in group.blocks:
+        for sample in samples_between(all_samples, block.start, block.end):
+            if sample.cadence_rpm is not None and 0 < float(sample.cadence_rpm) < 300:
+                values.append(float(sample.cadence_rpm))
+    return mean(values) if values else None
+
+
 def summarize_intervals(groups, all_samples, hrs, threshold, classification):
     """
     Preserve the actual HR-detected work/recovery structure for sessions that
@@ -1610,6 +1687,7 @@ def summarize_intervals(groups, all_samples, hrs, threshold, classification):
     work_durations = [g.work_duration_s for g in hard]
     work_avg_hrs = [g.avg_work_hr for g in hard]
     work_max_hrs = [g.max_hr for g in hard]
+    work_avg_cadences_rpm = [average_effort_group_cadence(g, all_samples) for g in hard]
     recovery_durations = [g.duration_s for g in recoveries]
     recovery_avg_hrs = [g.avg_hr for g in recoveries]
 
@@ -1617,6 +1695,16 @@ def summarize_intervals(groups, all_samples, hrs, threshold, classification):
     weighted_work_hr = (
         sum(g.avg_work_hr * g.work_duration_s for g in hard) / work_total
         if work_total > 0 else mean(work_avg_hrs)
+    )
+
+    valid_work_cadence = [
+        (cad, g.work_duration_s) for cad, g in zip(work_avg_cadences_rpm, hard)
+        if cad is not None and g.work_duration_s > 0
+    ]
+    cadence_total = sum(d for _, d in valid_work_cadence)
+    weighted_work_cadence = (
+        sum(cad*d for cad, d in valid_work_cadence) / cadence_total
+        if cadence_total > 0 else None
     )
 
     valid_recovery_hr = [
@@ -1634,12 +1722,14 @@ def summarize_intervals(groups, all_samples, hrs, threshold, classification):
         work_durations_s=work_durations,
         work_avg_hrs=work_avg_hrs,
         work_max_hrs=work_max_hrs,
+        work_avg_cadences_rpm=work_avg_cadences_rpm,
         recovery_durations_s=recovery_durations,
         recovery_avg_hrs=recovery_avg_hrs,
         work_total_s=work_total,
         work_median_s=median(work_durations),
         work_avg_hr=weighted_work_hr,
         work_max_hr=max(work_max_hrs),
+        work_avg_cadence_rpm=weighted_work_cadence,
         recovery_median_s=median(recovery_durations) if recovery_durations else None,
         recovery_avg_hr=weighted_recovery_hr,
     )
@@ -1862,10 +1952,36 @@ class ActivityAnalysis:
     excluded_hr_samples: int
     distance_m: float
     elevation_gain_m: float | None
+    start_lat: float | None
+    start_lon: float | None
+    average_cadence_rpm: float | None
     has_hr: bool
     has_elevation: bool
     has_gps: bool
     has_power: bool
+
+
+
+def first_moving_gps_coordinate(samples: list[Sample], min_speed_kmh: float = 2.0) -> tuple[float | None, float | None]:
+    """Return a representative start coordinate, preferring the first moving GPS point."""
+    first_valid = None
+    for sample in samples:
+        if sample.lat is not None and sample.lon is not None:
+            first_valid = (sample.lat, sample.lon)
+            break
+
+    for a, b in zip(samples, samples[1:]):
+        if None in (a.lat, a.lon, b.lat, b.lon):
+            continue
+        dt = (b.timestamp - a.timestamp).total_seconds()
+        if not (0 < dt <= 60):
+            continue
+        distance = segment_distance_m(a, b)
+        speed_kmh = 3.6 * distance / dt
+        if speed_kmh >= min_speed_kmh:
+            return a.lat, a.lon
+
+    return first_valid if first_valid is not None else (None, None)
 
 
 def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
@@ -1890,6 +2006,8 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
 
     has_elevation = sum(s.elevation is not None for s in all_samples) >= 2
     has_gps = sum(s.lat is not None and s.lon is not None for s in all_samples) >= 2
+    start_lat, start_lon = first_moving_gps_coordinate(all_samples) if has_gps else (None, None)
+    average_cadence_rpm = average_recorded_cadence(all_samples)
     # Placeholder for future recorded-power support.
     has_power = False
 
@@ -1993,6 +2111,9 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
             excluded_hr_samples=max(0, len(raw_hrs)-len(hrs)),
             distance_m=distance_m,
             elevation_gain_m=elevation_gain_m,
+            start_lat=start_lat,
+            start_lon=start_lon,
+            average_cadence_rpm=average_cadence_rpm,
             has_hr=False,
             has_elevation=has_elevation,
             has_gps=has_gps,
@@ -2126,6 +2247,9 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         excluded_hr_samples=len(raw_hrs)-len(hrs),
         distance_m=distance_m,
         elevation_gain_m=elevation_gain_m,
+        start_lat=start_lat,
+        start_lon=start_lon,
+        average_cadence_rpm=average_cadence_rpm,
         has_hr=True,
         has_elevation=has_elevation,
         has_gps=has_gps,

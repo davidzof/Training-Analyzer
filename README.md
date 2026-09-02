@@ -2054,3 +2054,116 @@ as its lower anchor, and uses fixed generic reference weights of 1.0 at LT1,
 100. The already non-linear HR weighting is integrated directly; it is not
 squared a second time. Weekly JSON output includes summed HR Load and a count of
 activities contributing HR Load.
+
+
+## v30 start-location metadata
+
+When GPS is available, the scanner records a coarse activity start coordinate
+and reverse-geocodes it to presentation metadata: `start_lat`, `start_lon`,
+`start_city`, `start_region`, `start_country`, and `start_location`.
+
+Reverse geocoding uses OpenStreetMap Nominatim with a persistent cache rounded
+to 0.01 degrees. Use `--no-geocode` to disable it or `--geocode-cache PATH` to
+choose another cache. The exported JSON schema is version 3 and project version 30.
+
+
+## v31 activity presentation metadata
+
+The per-activity export now includes presentation metadata used by the dashboard:
+
+- `moving_time`: Strava moving time, formatted as H:MM:SS when available
+- `activity_gear`: existing Strava gear/bike/shoe label
+- `average_cadence_rpm`: Strava average cadence when present in activities.csv,
+  otherwise the average of positive recorded cadence samples found in GPX/TCX/FIT
+
+Cadence remains optional because historical files may not contain it.
+The exported JSON schema is version 4 and the project version is 31.
+
+
+## v31.1 error-path fix
+
+Fixed a regression introduced with cadence export: files that fail parsing
+(for example malformed GPX/XML) are again returned as normal `status="error"`
+activity records and no longer abort the entire scan because the error-path
+`TrainingSummary` constructors now initialise `average_cadence_rpm=None`.
+
+Schema remains version 4.
+
+
+## v31.2 hard-effort/descent fix
+
+Two related hard-effort edge cases were fixed:
+
+- high HR during a short downhill is no longer automatically treated as a
+  descent sensor artefact when the immediately preceding HR trace supports a
+  physiologically continuous hard effort;
+- `detect_hard_blocks` now breaks on recording/data gaps longer than 90 s, so
+  deleted or missing samples cannot accidentally be bridged into one hard block.
+
+The 5x8 Col de Mouilles regression test now produces five hard-HR blocks at
+LT2 = 160 bpm, including the short-downhill third interval.
+
+Schema remains version 4.
+
+
+## v31.3 Strava sport metadata fallback
+
+Fixed an activity-filtering bug affecting Strava files, especially GPX exports,
+that do not contain an embedded activity type. When `activities.csv` identifies
+the sport but the parsed file does not, the analyser now uses the normalized
+Strava `Activity Type` as a fallback **before** applying `--sport` filters.
+
+A sport type embedded in the activity file remains authoritative; metadata is
+used only when the parsed type is missing. The same fallback is retained in the
+exported per-activity row. This restores activities such as Nordic Ski GPX files
+that were previously parsed successfully but then discarded by sport filtering.
+
+Schema remains version 4; project version is 31.3.
+
+
+## v31.4 Strava sport metadata precedence
+
+For activities matched to `activities.csv`, the CSV `Activity Type` is now authoritative.
+This handles activities whose sport was corrected later in Strava while the exported
+GPX/TCX/FIT file still contains the original stale activity type. The recording-file type
+is retained only as a fallback when no usable CSV sport metadata is available. The
+precedence is applied before sport filtering and again during row enrichment so filtering
+and exported activity types stay consistent.
+
+Schema remains version 4; project version is 31.4.
+
+
+## v31.5 Sport normalisation cleanup
+
+- `activities.csv` remains authoritative for sport when matching Strava metadata is available.
+- Ski disciplines are preserved as specific internal activity types instead of being collapsed:
+  - `Nordic Ski` -> `nordicski`
+  - `Backcountry Ski` -> `backcountryski`
+  - `Alpine Ski` / generic skiing -> `skiing`
+  - `Roller Ski` -> `rollerski`
+- `--sport skiing` is an umbrella filter matching `skiing`, `nordicski`, and `backcountryski`.
+- Specific filters such as `--sport nordicski` match only that discipline. Roller skiing remains separate.
+
+Schema remains version 4; project version is 31.5.
+
+
+## v31.6 Minimum moving-time filter
+
+Training mode now has a configurable hard minimum moving-time threshold.
+
+- `--min-moving-minutes` defaults to `10`.
+- Activities with Strava `Moving Time` below the threshold are omitted entirely from the analysed activity list and all metadata-backed volume/weekly summaries.
+- The filter is applied before opening activity files when `activities.csv` is available, so short activities do not enter HR Load, HRmax, LT2, VAM, hard/tempo or interval analysis.
+- Set `--min-moving-minutes 0` to disable the cutoff.
+- When an activity has no matching Strava metadata and therefore no authoritative moving-time value, it is not discarded solely on elapsed duration.
+
+Schema remains version 4; project version is 31.6.
+
+
+## v31.7 HRmax artefact exclusion and effort cadence
+
+- Activities flagged with `hr_artefact=true` are excluded from the summary `credible_hrmax_candidates` list. The raw/analysed activity data are retained; this is only a conservative evidence rule for HRmax.
+- Hard blocks now include `average_cadence_rpm` when cadence samples are available.
+- Detected interval sessions now include `interval_work_avg_cadence_rpm` (duration-weighted across work blocks) and `interval_work_avg_cadences_rpm` (per detected work interval). Missing cadence remains `null` / blank rather than being inferred.
+
+Schema remains version 4; project version is 31.7.

@@ -433,11 +433,13 @@ class TrainingSummary:
     interval_work_median: str | None
     interval_work_avg_hr: float | None
     interval_work_max_hr: int | None
+    interval_work_avg_cadence_rpm: float | None
     interval_recovery_median: str | None
     interval_recovery_avg_hr: float | None
     interval_work_durations: str | None
     interval_work_avg_hrs: str | None
     interval_work_max_hrs: str | None
+    interval_work_avg_cadences_rpm: str | None
     interval_recovery_durations: str | None
     interval_recovery_avg_hrs: str | None
     interval_summary: str | None
@@ -454,6 +456,9 @@ class TrainingSummary:
     excluded_hr_samples: int
     distance_km: float | None
     elevation_gain_m: float | None
+    start_lat: float | None
+    start_lon: float | None
+    average_cadence_rpm: float | None
     has_hr: bool
     has_elevation: bool
     has_gps: bool
@@ -522,6 +527,7 @@ def _serialize_hard_blocks(result) -> list[dict]:
             "duration_seconds": round(b.duration_s, 1),
             "average_hr_bpm": round(b.avg_hr, 1),
             "max_hr_bpm": int(b.max_hr),
+            "average_cadence_rpm": round(b.avg_cadence_rpm, 1) if b.avg_cadence_rpm is not None else None,
         }
         for b in result.blocks
     ]
@@ -591,14 +597,15 @@ def process_training_file(
             vam_comparison=None, time_85pct_seconds=None,
             time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, hr_intensity=None, hr_load=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
             hard_blocks=[], hard_block_gaps=[], tempo_block_count=0, tempo_blocks=[], interval_count=None, interval_work_total=None,
-            interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
+            interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None, interval_work_avg_cadence_rpm=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
-            interval_work_durations=None, interval_work_avg_hrs=None, interval_work_max_hrs=None,
+            interval_work_durations=None, interval_work_avg_hrs=None, interval_work_max_hrs=None, interval_work_avg_cadences_rpm=None,
             interval_recovery_durations=None, interval_recovery_avg_hrs=None, interval_summary=None,
             overall_ride=None, key_effort=None,
             classification=None, confidence=None, lt2_low=None, lt2_high=None,
             lt2_evidence=None, lt2_reason=None, lt2_clue=None,
             hr_artefact=False, excluded_hr_samples=0, distance_km=None, elevation_gain_m=None,
+            start_lat=None, start_lon=None, average_cadence_rpm=None,
             has_hr=False, has_elevation=False, has_gps=False, has_power=False, status="error",
             error=(
                 "Could not import analyze_training.py. Put it in the same "
@@ -674,11 +681,13 @@ def process_training_file(
             interval_work_median=_format_duration_hms(result.interval_summary.work_median_s) if result.interval_summary is not None else None,
             interval_work_avg_hr=round(result.interval_summary.work_avg_hr, 1) if result.interval_summary is not None else None,
             interval_work_max_hr=result.interval_summary.work_max_hr if result.interval_summary is not None else None,
+            interval_work_avg_cadence_rpm=round(result.interval_summary.work_avg_cadence_rpm, 1) if result.interval_summary is not None and result.interval_summary.work_avg_cadence_rpm is not None else None,
             interval_recovery_median=_format_duration_hms(result.interval_summary.recovery_median_s) if result.interval_summary is not None and result.interval_summary.recovery_median_s is not None else None,
             interval_recovery_avg_hr=round(result.interval_summary.recovery_avg_hr, 1) if result.interval_summary is not None and result.interval_summary.recovery_avg_hr is not None else None,
             interval_work_durations=_format_duration_list(result.interval_summary.work_durations_s) if result.interval_summary is not None else None,
             interval_work_avg_hrs=_format_number_list(result.interval_summary.work_avg_hrs, 1) if result.interval_summary is not None else None,
             interval_work_max_hrs=_format_number_list(result.interval_summary.work_max_hrs, 0) if result.interval_summary is not None else None,
+            interval_work_avg_cadences_rpm=_format_number_list(result.interval_summary.work_avg_cadences_rpm, 1) if result.interval_summary is not None else None,
             interval_recovery_durations=_format_duration_list(result.interval_summary.recovery_durations_s) if result.interval_summary is not None else None,
             interval_recovery_avg_hrs=_format_number_list(result.interval_summary.recovery_avg_hrs, 1) if result.interval_summary is not None else None,
             interval_summary=_format_interval_summary(result.interval_summary),
@@ -695,6 +704,9 @@ def process_training_file(
             excluded_hr_samples=result.excluded_hr_samples,
             distance_km=round(result.distance_m/1000.0, 2),
             elevation_gain_m=round(result.elevation_gain_m, 0) if result.elevation_gain_m is not None else None,
+            start_lat=round(result.start_lat, 3) if result.start_lat is not None else None,
+            start_lon=round(result.start_lon, 3) if result.start_lon is not None else None,
+            average_cadence_rpm=round(result.average_cadence_rpm, 1) if result.average_cadence_rpm is not None else None,
             has_hr=result.has_hr,
             has_elevation=result.has_elevation,
             has_gps=result.has_gps,
@@ -715,14 +727,15 @@ def process_training_file(
             vam_comparison=None, time_85pct_seconds=None,
             time_90pct_seconds=None, zone1_seconds=None, zone2_seconds=None, zone3_seconds=None, zone_total_seconds=None, active_zone1_seconds=None, active_zone2_seconds=None, active_zone3_seconds=None, active_zone_total_seconds=None, hr_intensity=None, hr_load=None, active_zone1_pct=None, active_zone2_pct=None, active_zone3_pct=None, zone1_pct=None, zone2_pct=None, zone3_pct=None, hard_block_threshold_bpm=None, hard_block_count=0,
             hard_blocks=[], hard_block_gaps=[], tempo_block_count=0, tempo_blocks=[], interval_count=None, interval_work_total=None,
-            interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None,
+            interval_work_median=None, interval_work_avg_hr=None, interval_work_max_hr=None, interval_work_avg_cadence_rpm=None,
             interval_recovery_median=None, interval_recovery_avg_hr=None,
-            interval_work_durations=None, interval_work_avg_hrs=None, interval_work_max_hrs=None,
+            interval_work_durations=None, interval_work_avg_hrs=None, interval_work_max_hrs=None, interval_work_avg_cadences_rpm=None,
             interval_recovery_durations=None, interval_recovery_avg_hrs=None, interval_summary=None,
             overall_ride=None, key_effort=None,
             classification=None, confidence=None, lt2_low=None, lt2_high=None,
             lt2_evidence=None, lt2_reason=None, lt2_clue=None,
             hr_artefact=False, excluded_hr_samples=0, distance_km=None, elevation_gain_m=None,
+            start_lat=None, start_lon=None, average_cadence_rpm=None,
             has_hr=False, has_elevation=False, has_gps=False, has_power=False,
             status="error", error=str(exc),
         )

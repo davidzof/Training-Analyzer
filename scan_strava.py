@@ -25,6 +25,9 @@ from pathlib import Path
 from statistics import median
 import re
 import shutil
+import time
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from activity_file_processor import detect_format, process_training_file
 
@@ -176,7 +179,15 @@ TRAINING_CSV_FIELDS = [
     "bike_weight",
     "bike_id",
     "athlete_weight",
+    "start_lat",
+    "start_lon",
+    "start_city",
+    "start_region",
+    "start_country",
+    "start_location",
     "duration",
+    "moving_time",
+    "average_cadence_rpm",
     "average_hr",
     "raw_max_hr",
     "analysed_max_hr",
@@ -231,11 +242,13 @@ TRAINING_CSV_FIELDS = [
     "interval_work_median",
     "interval_work_avg_hr",
     "interval_work_max_hr",
+    "interval_work_avg_cadence_rpm",
     "interval_recovery_median",
     "interval_recovery_avg_hr",
     "interval_work_durations",
     "interval_work_avg_hrs",
     "interval_work_max_hrs",
+    "interval_work_avg_cadences_rpm",
     "interval_recovery_durations",
     "interval_recovery_avg_hrs",
     "interval_summary",
@@ -343,6 +356,16 @@ def build_parser(lang: str = "en") -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--min-moving-minutes",
+        type=float,
+        default=10.0,
+        help=(
+            "Minimum moving time for an activity to enter the training dataset "
+            "(default: 10 minutes). Activities below this threshold are omitted "
+            "entirely when Strava moving-time metadata is available. Set to 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--activities-csv",
         type=Path,
         default=None,
@@ -368,6 +391,20 @@ def build_parser(lang: str = "en") -> argparse.ArgumentParser:
             "Write structured JSON instead of CSV. The JSON contains the period, "
             "analysis parameters, season summary and the same per-activity fields "
             "normally written to CSV."
+        ),
+    )
+    parser.add_argument(
+        "--no-geocode",
+        action="store_true",
+        help="Do not reverse-geocode activity start coordinates.",
+    )
+    parser.add_argument(
+        "--geocode-cache",
+        type=Path,
+        default=None,
+        help=(
+            "Optional reverse-geocoding cache path. By default a "
+            ".training-analyser-geocode-cache.json file is kept beside the activity directory."
         ),
     )
     parser.add_argument(
@@ -549,6 +586,7 @@ def load_strava_metadata(path: Path | None) -> dict[str, dict]:
                 "strava_activity_type": clean("Activity Type"),
                 "elapsed_time_s": as_float("Elapsed Time"),
                 "moving_time_s": as_float("Moving Time"),
+                "average_cadence_rpm": as_float("Average Cadence"),
                 "distance_m_meta": as_float("Distance"),
                 "elevation_gain_m_meta": as_float("Elevation Gain"),
             }
@@ -563,6 +601,12 @@ def parse_strava_year(value: str | None) -> int | None:
 
 
 def normalize_strava_sport(value: str | None) -> str | None:
+    """Return a stable, specific internal sport name.
+
+    Keep distinct ski disciplines distinct in exported data.  In particular,
+    Nordic Ski is not collapsed to generic skiing; umbrella behaviour belongs
+    in sport_matches(), not in the stored activity type.
+    """
     if not value:
         return None
     key = value.strip().lower().replace("_", "").replace(" ", "")
@@ -577,13 +621,17 @@ def normalize_strava_sport(value: str | None) -> str | None:
         "trailrun": "running",
         "walk": "walking",
         "hike": "walking",
-        "nordicski": "skiing",
-        "nordicskiing": "skiing",
-        "crosscountryski": "skiing",
-        "crosscountryskiing": "skiing",
-        "backcountryski": "skiing",
-        "rollerski": "roller skiing",
-        "rollerskiing": "roller skiing",
+        "nordicski": "nordicski",
+        "nordicskiing": "nordicski",
+        "crosscountryski": "nordicski",
+        "crosscountryskiing": "nordicski",
+        "backcountryski": "backcountryski",
+        "alpineski": "skiing",
+        "downhillski": "skiing",
+        "ski": "skiing",
+        "skiing": "skiing",
+        "rollerski": "rollerski",
+        "rollerskiing": "rollerski",
     }
     return mapping.get(key, value.strip().lower())
 
@@ -602,11 +650,23 @@ def parse_sport_filter(value: str | None) -> set[str] | None:
     return sports or None
 
 
+SKIING_SPORTS = {"skiing", "nordicski", "backcountryski"}
+
+
 def sport_matches(actual_value: str | None, requested_value: str | None) -> bool:
+    """Match a specific stored sport against one or more requested sports.
+
+    ``skiing`` is an umbrella filter for alpine/generic skiing, Nordic skiing
+    and backcountry skiing.  Specific filters such as ``nordicski`` remain
+    specific. Roller skiing is deliberately separate.
+    """
     requested = parse_sport_filter(requested_value)
     if requested is None:
         return True
-    return normalize_strava_sport(actual_value) in requested
+    actual = normalize_strava_sport(actual_value)
+    if actual in requested:
+        return True
+    return "skiing" in requested and actual in SKIING_SPORTS
 
 
 def preselect_files_from_metadata(
@@ -615,6 +675,7 @@ def preselect_files_from_metadata(
     year: int | None,
     month: int | None,
     sport: str | None,
+    min_moving_seconds: float = 0.0,
 ) -> tuple[list[Path], int, int]:
     """Select candidate files from activities.csv before opening activity files.
 
@@ -629,10 +690,13 @@ def preselect_files_from_metadata(
         if not date_in_window(info.get("strava_activity_date"), year, month):
             continue
 
-        if requested_sports is not None:
-            actual = normalize_strava_sport(info.get("strava_activity_type"))
-            if actual not in requested_sports:
-                continue
+        if requested_sports is not None and not sport_matches(
+            info.get("strava_activity_type"), sport
+        ):
+            continue
+        moving = info.get("moving_time_s")
+        if moving is not None and float(moving) < max(0.0, float(min_moving_seconds)):
+            continue
 
         matched_rows += 1
         path = directory / filename
@@ -648,10 +712,144 @@ def preselect_files_from_metadata(
     selected.sort(key=lambda p: p.name.lower())
     return selected, matched_rows, missing
 
+
+def _load_geocode_cache(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_geocode_cache(path: Path, cache: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _location_cache_key(lat: float, lon: float) -> str:
+    return f"{round(float(lat), 2):.2f},{round(float(lon), 2):.2f}"
+
+
+def _pick_locality(address: dict) -> str | None:
+    for key in ("city", "town", "village", "municipality", "hamlet"):
+        value = address.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _format_geocode_result(payload: dict) -> dict:
+    address = payload.get("address") if isinstance(payload, dict) else None
+    if not isinstance(address, dict):
+        address = {}
+
+    city = _pick_locality(address)
+    region = address.get("county") or address.get("state_district") or address.get("state")
+    country = address.get("country")
+
+    parts = []
+    for value in (city, region, country):
+        if value and value not in parts:
+            parts.append(str(value))
+
+    return {
+        "start_city": city,
+        "start_region": str(region) if region else None,
+        "start_country": str(country) if country else None,
+        "start_location": ", ".join(parts) if parts else None,
+    }
+
+
+def _reverse_geocode_nominatim(lat: float, lon: float, timeout: float = 10.0) -> dict:
+    query = urlencode(
+        {
+            "format": "jsonv2",
+            "lat": f"{lat:.5f}",
+            "lon": f"{lon:.5f}",
+            "zoom": 10,
+            "addressdetails": 1,
+            "accept-language": "en",
+        }
+    )
+    request = Request(
+        "https://nominatim.openstreetmap.org/reverse?" + query,
+        headers={"User-Agent": "TrainingAnalyser/30 (personal endurance-training analysis)"},
+    )
+    with urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return _format_geocode_result(payload)
+
+
+def add_start_locations(rows: list[dict], cache_path: Path | None, enabled: bool = True) -> None:
+    """Add coarse city/region/country labels to rows in-place using a persistent cache."""
+    if not enabled:
+        for row in rows:
+            row.setdefault("start_city", None)
+            row.setdefault("start_region", None)
+            row.setdefault("start_country", None)
+            row.setdefault("start_location", None)
+        return
+
+    cache = _load_geocode_cache(cache_path) if cache_path is not None else {}
+    dirty = False
+    last_remote_lookup = 0.0
+
+    for row in rows:
+        lat = row.get("start_lat")
+        lon = row.get("start_lon")
+
+        if lat is None or lon is None:
+            row["start_city"] = None
+            row["start_region"] = None
+            row["start_country"] = None
+            row["start_location"] = None
+            continue
+
+        key = _location_cache_key(lat, lon)
+        location = cache.get(key)
+
+        if not isinstance(location, dict):
+            wait = 1.05 - (time.monotonic() - last_remote_lookup)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                location = _reverse_geocode_nominatim(round(float(lat), 2), round(float(lon), 2))
+            except Exception:
+                location = {
+                    "start_city": None,
+                    "start_region": None,
+                    "start_country": None,
+                    "start_location": None,
+                }
+            last_remote_lookup = time.monotonic()
+            cache[key] = location
+            dirty = True
+
+        row.update(location)
+
+    if dirty and cache_path is not None:
+        _save_geocode_cache(cache_path, cache)
+
+
 def enrich_training_row(row: dict, metadata: dict[str, dict]) -> dict:
-    """Add Strava gear metadata to one training-analysis row."""
+    """Add Strava metadata to one training-analysis row.
+
+    Strava activities.csv is authoritative for sport type when metadata exists.
+    Exported GPX/TCX/FIT files can retain a stale original sport after the
+    activity is corrected in Strava, so use the parsed file type only when
+    there is no usable CSV sport value.
+    """
     enriched = dict(row)
     info = metadata.get(normalize_export_filename(row.get("filename")) or "", {})
+
+    metadata_activity_type = normalize_strava_sport(info.get("strava_activity_type"))
+    if metadata_activity_type:
+        enriched["activity_type"] = metadata_activity_type
     for field in (
         "strava_activity_id",
         "activity_name",
@@ -661,6 +859,10 @@ def enrich_training_row(row: dict, metadata: dict[str, dict]) -> dict:
         "athlete_weight",
     ):
         enriched[field] = info.get(field)
+
+    enriched["moving_time"] = _format_hms_seconds(info.get("moving_time_s"))
+    if info.get("average_cadence_rpm") is not None:
+        enriched["average_cadence_rpm"] = round(float(info["average_cadence_rpm"]), 1)
 
     # Strava's Activity Gear field is generic: it can be a bicycle, running
     # shoe, ski equipment, etc. Keep activity_gear for every sport, but only
@@ -678,8 +880,10 @@ def _strava_activity_type_from_normalized(value: str | None) -> str | None:
         "running": "Run",
         "walking": "Walk",
         "hiking": "Hike",
-        "skiing": "NordicSki",
-        "roller skiing": "RollerSki",
+        "skiing": "AlpineSki",
+        "nordicski": "NordicSki",
+        "backcountryski": "BackcountrySki",
+        "rollerski": "RollerSki",
     }
     if not value:
         return None
@@ -796,18 +1000,36 @@ def fmt_number(value, digits=1):
     return f"{value:.{digits}f}"
 
 
-def _metadata_matches(info: dict, year: int | None, month: int | None, sport: str | None) -> bool:
+def _metadata_matches(
+    info: dict,
+    year: int | None,
+    month: int | None,
+    sport: str | None,
+    min_moving_seconds: float = 0.0,
+) -> bool:
     if not date_in_window(info.get("strava_activity_date"), year, month):
         return False
     if not sport_matches(info.get("strava_activity_type"), sport):
         return False
+    moving = info.get("moving_time_s")
+    if moving is not None and float(moving) < max(0.0, float(min_moving_seconds)):
+        return False
     return True
 
 
-def metadata_volume_summary(metadata: dict[str, dict], year: int | None, month: int | None, sport: str | None) -> dict | None:
+def metadata_volume_summary(
+    metadata: dict[str, dict],
+    year: int | None,
+    month: int | None,
+    sport: str | None,
+    min_moving_seconds: float = 0.0,
+) -> dict | None:
     if not metadata:
         return None
-    rows = [info for info in metadata.values() if _metadata_matches(info, year, month, sport)]
+    rows = [
+        info for info in metadata.values()
+        if _metadata_matches(info, year, month, sport, min_moving_seconds)
+    ]
     if not rows:
         return None
     elapsed = [float(r["elapsed_time_s"]) for r in rows if r.get("elapsed_time_s") is not None]
@@ -847,12 +1069,23 @@ def _duration_seconds_hms(value: str | None) -> float | None:
         return None
 
 
+
+def _format_hms_seconds(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    total = max(0, int(round(float(seconds))))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
 def build_weekly_summary(
     rows: list[dict],
     metadata: dict[str, dict],
     year: int | None,
     month: int | None,
     sport: str | None,
+    min_moving_seconds: float = 0.0,
 ) -> list[dict]:
     """Aggregate transparent weekly training volume and 3-zone HR time.
 
@@ -1060,6 +1293,7 @@ def build_training_summary(rows: list[dict], year: int | None, month: int | None
         r for r in with_hr
         if r.get("hrmax_candidate") is not None
         and r.get("hrmax_confidence") in {"high", "medium"}
+        and not bool(r.get("hr_artefact"))
     ]
     credible_sorted = sorted(
         credible, key=lambda r: float(r["hrmax_candidate"]), reverse=True
@@ -1194,8 +1428,8 @@ def write_json_output(
     args,
 ) -> None:
     payload = {
-        "schema_version": 2,
-        "project_version": 29,
+        "schema_version": 4,
+        "project_version": "31.7",
         "generated_by": "training-analyser",
         "analysis_parameters": {
             "hrmax_bpm": args.hrmax,
@@ -1309,6 +1543,7 @@ def print_training_summary(rows: list[dict], year: int | None, month: int | None
         r for r in with_hr
         if r.get("hrmax_candidate") is not None
         and r.get("hrmax_confidence") in {"high", "medium"}
+        and not bool(r.get("hr_artefact"))
     ]
     if credible:
         credible_sorted = sorted(
@@ -1475,6 +1710,14 @@ def run_training_scan(
 
     try:
         for index, path in enumerate(files, start=1):
+            metadata_key = normalize_export_filename(path.name) or path.name
+            pre_info = strava_metadata.get(metadata_key, {})
+            moving_s = pre_info.get("moving_time_s")
+            min_moving_s = max(0.0, float(args.min_moving_minutes)) * 60.0
+            if moving_s is not None and float(moving_s) < min_moving_s:
+                counts["filtered"] += 1
+                continue
+
             summary = process_training_file(
                 path,
                 hrmax=args.hrmax,
@@ -1483,6 +1726,20 @@ def run_training_scan(
                 min_hr=args.min_hr,
                 max_hr=args.max_hr,
             )
+
+            # activities.csv reflects Strava's current activity metadata and is
+            # authoritative for sport type. Exported GPX/TCX/FIT files can keep
+            # a stale original type after the activity is corrected in Strava.
+            # Fall back to the parsed file type only when CSV metadata has no
+            # usable sport value.
+            metadata_info = strava_metadata.get(
+                normalize_export_filename(summary.filename) or "", {}
+            )
+            metadata_activity_type = normalize_strava_sport(
+                metadata_info.get("strava_activity_type")
+            )
+            if metadata_activity_type:
+                summary.activity_type = metadata_activity_type
 
             # Errors often have no parsed date/type. Count and display them
             # before applying year/sport filters so they cannot masquerade as
@@ -1518,6 +1775,20 @@ def run_training_scan(
         if csv_handle is not None:
             csv_handle.close()
 
+    geocode_cache = args.geocode_cache
+    if geocode_cache is None:
+        geocode_cache = args.directory.parent / ".training-analyser-geocode-cache.json"
+    add_start_locations(rows, geocode_cache, enabled=not args.no_geocode)
+
+    # CSV rows were initially written during scanning. Rewrite them now that
+    # coarse location metadata has been added.
+    if not args.json:
+        with output.open("w", newline="", encoding="utf-8") as handle:
+            final_writer = csv.DictWriter(handle, fieldnames=TRAINING_CSV_FIELDS)
+            final_writer.writeheader()
+            for row in rows:
+                final_writer.writerow(_csv_safe_training_row(row))
+
     if args.add_missing_metadata:
         if activities_csv is None:
             print(t("metadata_skipped", args.lang), file=sys.stderr)
@@ -1529,7 +1800,7 @@ def run_training_scan(
                     # Refresh annual/season volume so the current run immediately
                     # includes the newly appended activities.
                     refreshed_metadata = load_strava_metadata(activities_csv)
-                    volume = metadata_volume_summary(refreshed_metadata, args.year, args.month, args.sport)
+                    volume = metadata_volume_summary(refreshed_metadata, args.year, args.month, args.sport, args.min_moving_minutes * 60.0)
             except (OSError, ValueError) as exc:
                 print(t("metadata_update_error", args.lang, value=exc), file=sys.stderr)
                 return 2
@@ -1541,7 +1812,7 @@ def run_training_scan(
         volume = dict(volume)
         volume["activities"] = len(files) - counts["filtered"]
 
-    weekly = build_weekly_summary(rows, strava_metadata, args.year, args.month, args.sport)
+    weekly = build_weekly_summary(rows, strava_metadata, args.year, args.month, args.sport, args.min_moving_minutes * 60.0)
     structured_summary = build_training_summary(
         rows + error_rows, args.year, args.month, args.sport, volume, weekly
     )
@@ -1610,7 +1881,7 @@ def main() -> int:
     else:
         print(t("metadata_missing", lang))
 
-    volume = metadata_volume_summary(strava_metadata, args.year, args.month, args.sport)
+    volume = metadata_volume_summary(strava_metadata, args.year, args.month, args.sport, args.min_moving_minutes * 60.0)
 
     # Major speed-up: when activities.csv is available and at least one
     # date/sport filter is requested, use the CSV as the index and open only
@@ -1618,7 +1889,8 @@ def main() -> int:
     # HR/VAM/LT2 analysis.
     if strava_metadata and not args.add_missing_metadata and (args.year is not None or args.sport is not None):
         files, matched_count, missing_count = preselect_files_from_metadata(
-            directory, strava_metadata, args.year, args.month, args.sport
+            directory, strava_metadata, args.year, args.month, args.sport,
+            args.min_moving_minutes * 60.0
         )
         print(t("csv_rows_matched", lang, value=matched_count))
         print(t("matching_files", lang, value=len(files)))
