@@ -55,3 +55,10 @@ Fixed a NameError after removal of the interval cadence chart: the interval aver
 ### v4.12
 
 - Top-level Distance and Elevation cards now prefer the analyser-exported `summary.volume.distance_km` and `summary.volume.elevation_gain_m` values, falling back to activity sums only if those summary fields are absent.
+
+
+### v4.13
+
+- Adds tempo-block detail beneath the sustained-effort timeline.
+- Hard blocks are visually nested beneath the tempo block that contains them, making it explicit that the harder LT2-level efforts are part of the broader sustained tempo effort.
+- Hard blocks that do not fall inside a tempo block remain visible separately.

@@ -30,6 +30,76 @@ def _as_float(value):
     return number if number == number else None
 
 
+def _duration_label(seconds):
+    if seconds is None:
+        return "—"
+    try:
+        total = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return "—"
+    hours, rem = divmod(total, 3600)
+    mins, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
+
+
+def _clock_seconds(value):
+    """Convert HH:MM:SS to seconds since midnight for block nesting."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parts = [int(part) for part in value.split(":")]
+        if len(parts) != 3:
+            return None
+        hours, minutes, seconds = parts
+        return hours * 3600 + minutes * 60 + seconds
+    except (TypeError, ValueError):
+        return None
+
+
+def _block_is_within(child, parent):
+    child_start = _clock_seconds(child.get("start"))
+    child_end = _clock_seconds(child.get("end"))
+    parent_start = _clock_seconds(parent.get("start"))
+    parent_end = _clock_seconds(parent.get("end"))
+    if None in (child_start, child_end, parent_start, parent_end):
+        return False
+    return child_start >= parent_start and child_end <= parent_end
+
+
+def _hard_block_line(index, block):
+    bits = [_duration_label(block.get("duration_seconds"))]
+    avg_hr = _as_float(block.get("average_hr_bpm"))
+    max_hr = _as_float(block.get("max_hr_bpm"))
+    block_cadence = _as_float(block.get("average_cadence_rpm"))
+    if avg_hr is not None:
+        bits.append(f"{avg_hr:.1f} bpm avg")
+    if max_hr is not None:
+        bits.append(f"{max_hr:.0f} bpm max")
+    if block_cadence is not None:
+        bits.append(f"{block_cadence:.1f} rpm")
+    return f"**{index}.** " + " · ".join(bits)
+
+
+def _tempo_block_line(index, block, nested_count):
+    bits = [_duration_label(block.get("duration_seconds"))]
+    avg_hr = _as_float(block.get("average_hr_bpm"))
+    max_hr = _as_float(block.get("max_hr_bpm"))
+    above_lt1 = _as_float(block.get("above_lt1_fraction"))
+    above_lt2 = _as_float(block.get("above_lt2_fraction"))
+    if avg_hr is not None:
+        bits.append(f"{avg_hr:.1f} bpm avg")
+    if max_hr is not None:
+        bits.append(f"{max_hr:.0f} bpm max")
+    if above_lt1 is not None:
+        bits.append(f"{above_lt1 * 100:.1f}% above LT1")
+    if above_lt2 is not None:
+        bits.append(f"{above_lt2 * 100:.1f}% above LT2")
+    suffix = f" · contains {nested_count} hard block" + ("s" if nested_count != 1 else "")
+    return f"**Tempo {index}.** " + " · ".join(bits) + suffix
+
+
 with st.sidebar:
     st.header("Data")
     uploaded = st.file_uploader("Open analyser JSON", type=["json"])
@@ -161,32 +231,35 @@ if activity:
         effort_timeline_chart(activity)
 
         hard_blocks = activity.get("hard_blocks", []) or []
-        if hard_blocks:
-            hard_lines = []
-            for index, block in enumerate(hard_blocks, start=1):
-                duration_seconds = block.get("duration_seconds")
-                if duration_seconds is not None:
-                    mins, secs = divmod(int(round(duration_seconds)), 60)
-                    duration_label = f"{mins}:{secs:02d}"
-                else:
-                    duration_label = "—"
+        tempo_blocks = activity.get("tempo_blocks", []) or []
 
-                avg_hr = block.get("average_hr_bpm")
-                max_hr = block.get("max_hr_bpm")
-                block_cadence = _as_float(block.get("average_cadence_rpm"))
+        if tempo_blocks:
+            st.caption("Tempo blocks · hard blocks are shown nested where they fall inside")
+            assigned_hard = set()
+            for tempo_index, tempo in enumerate(tempo_blocks, start=1):
+                nested = [
+                    (hard_index, hard)
+                    for hard_index, hard in enumerate(hard_blocks, start=1)
+                    if _block_is_within(hard, tempo)
+                ]
+                st.markdown(_tempo_block_line(tempo_index, tempo, len(nested)))
+                for hard_index, hard in nested:
+                    assigned_hard.add(hard_index - 1)
+                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ {_hard_block_line(hard_index, hard)}", unsafe_allow_html=True)
 
-                bits = [duration_label]
-                if avg_hr is not None:
-                    bits.append(f"{avg_hr:.1f} bpm avg")
-                if max_hr is not None:
-                    bits.append(f"{max_hr:.0f} bpm max")
-                if block_cadence is not None:
-                    bits.append(f"{block_cadence:.1f} rpm")
-                hard_lines.append(f"**{index}.** " + " · ".join(bits))
-
+            unassigned = [
+                (hard_index, hard)
+                for hard_index, hard in enumerate(hard_blocks, start=1)
+                if hard_index - 1 not in assigned_hard
+            ]
+            if unassigned:
+                st.caption("Other hard blocks")
+                for hard_index, hard in unassigned:
+                    st.markdown(_hard_block_line(hard_index, hard))
+        elif hard_blocks:
             st.caption("Hard blocks")
-            for line in hard_lines:
-                st.markdown(line)
+            for hard_index, hard in enumerate(hard_blocks, start=1):
+                st.markdown(_hard_block_line(hard_index, hard))
 
     # Interval cadence is still useful in the textual interval summary even
     # though the separate cadence chart was removed in v4.10.
