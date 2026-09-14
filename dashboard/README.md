@@ -62,3 +62,31 @@ Fixed a NameError after removal of the interval cadence chart: the interval aver
 - Adds tempo-block detail beneath the sustained-effort timeline.
 - Hard blocks are visually nested beneath the tempo block that contains them, making it explicit that the harder LT2-level efforts are part of the broader sustained tempo effort.
 - Hard blocks that do not fall inside a tempo block remain visible separately.
+
+## v4.14
+
+- The **Intensity vs Load** scatter plot is now clickable. Clicking an activity point opens the matching activity in **Activity Explorer**.
+- The clicked point is enlarged while selected; double-click clears the chart selection.
+- Navigation uses the exported activity key only; no additional activity data are loaded or inferred.
+
+
+
+## v4.15 — HR-duration curve
+
+Adds a Heart-rate duration curve section for analyser schema 5 / project 31.8 exports.
+
+- Annual best and rolling 8-week snapshots can be selected.
+- Combined or individual-sport curves can be displayed.
+- HRmax, LT2 and LT1 are overlaid as reference lines when present in the export.
+- The duration axis is explicitly logarithmic so durations from 1 minute to 4 hours remain legible without pretending they are evenly spaced.
+- Hovering a point shows the source activity and date.
+- The dashboard still only reads analyser JSON and performs no physiological inference.
+
+
+## v4.16 — HR-duration P95
+
+- Adds a **Curve statistic** selector: **Best observed** or **95th percentile**.
+- P95 reads the analyser's activity-level percentile curve and does not calculate physiology in the dashboard.
+- Tooltips show the number of qualifying activities at each duration.
+- Best-observed tooltips continue to show the source activity/date.
+- Durations with fewer than 8 qualifying activities are intentionally absent from the P95 curve.

@@ -391,6 +391,7 @@ class TrainingSummary:
     best_30m_hr: float | None
     best_60m_hr: float | None
     best_90m_hr: float | None
+    hr_duration_curve: list[dict]
     best_2h_hr: float | None
     best_2h_moving_fraction: float | None
     best_2h_hr_p10: float | None
@@ -589,7 +590,7 @@ def process_training_file(
             duration=None, average_hr=None, raw_max_hr=None,
             analysed_max_hr=None, hrmax_10s=None, hrmax_30s=None, hrmax_60s=None,
             hrmax_candidate=None, hrmax_confidence=None, hrmax_reason=None,
-            best_30m_hr=None, best_60m_hr=None, best_90m_hr=None, best_2h_hr=None,
+            best_30m_hr=None, best_60m_hr=None, best_90m_hr=None, hr_duration_curve=[], best_2h_hr=None,
             best_2h_moving_fraction=None, best_2h_hr_p10=None, best_2h_hr_p90=None,
             best_4h_hr=None, best_4h_moving_fraction=None, best_4h_hr_p10=None,
             best_4h_hr_p90=None,
@@ -638,6 +639,11 @@ def process_training_file(
             best_30m_hr=round(result.best30_hr, 1) if result.best30_hr is not None else None,
             best_60m_hr=round(result.best60_hr, 1) if result.best60_hr is not None else None,
             best_90m_hr=round(result.best90_hr, 1) if result.best90_hr is not None else None,
+            hr_duration_curve=[
+                {"duration_minutes": minutes, "bpm": round(bpm, 1)}
+                for minutes, bpm in sorted(result.hr_duration_curve.items())
+                if bpm is not None
+            ],
             best_2h_hr=round(sustained2h.avg_hr, 1) if sustained2h is not None else None,
             best_2h_moving_fraction=round(sustained2h.moving_fraction, 4) if sustained2h is not None else None,
             best_2h_hr_p10=round(sustained2h.hr_p10, 1) if sustained2h is not None else None,
@@ -719,7 +725,7 @@ def process_training_file(
             duration=None, average_hr=None, raw_max_hr=None,
             analysed_max_hr=None, hrmax_10s=None, hrmax_30s=None, hrmax_60s=None,
             hrmax_candidate=None, hrmax_confidence=None, hrmax_reason=None,
-            best_30m_hr=None, best_60m_hr=None, best_90m_hr=None, best_2h_hr=None,
+            best_30m_hr=None, best_60m_hr=None, best_90m_hr=None, hr_duration_curve=[], best_2h_hr=None,
             best_2h_moving_fraction=None, best_2h_hr_p10=None, best_2h_hr_p90=None,
             best_4h_hr=None, best_4h_moving_fraction=None, best_4h_hr_p10=None,
             best_4h_hr_p90=None,

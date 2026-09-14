@@ -200,6 +200,7 @@ TRAINING_CSV_FIELDS = [
     "best_30m_hr",
     "best_60m_hr",
     "best_90m_hr",
+    "hr_duration_curve",
     "best_2h_hr",
     "best_2h_moving_fraction",
     "best_2h_hr_p10",
@@ -1259,6 +1260,129 @@ def build_weekly_summary(
     return weeks
 
 
+
+def _curve_point_map(row: dict) -> dict[int, float]:
+    out = {}
+    for point in row.get("hr_duration_curve") or []:
+        try:
+            duration = int(point.get("duration_minutes"))
+            bpm = float(point.get("bpm"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        out[duration] = bpm
+    return out
+
+
+def _duration_values_by_activity(rows: list[dict]) -> dict[int, list[tuple[float, dict]]]:
+    """Collect one best HR observation per activity for each curve duration."""
+    values = {}
+    for row in rows:
+        if row.get("status") != "ok" or not row.get("has_hr") or row.get("hr_artefact"):
+            continue
+        for duration, bpm in _curve_point_map(row).items():
+            values.setdefault(duration, []).append((bpm, row))
+    return values
+
+
+def _best_hr_duration_curve(rows: list[dict]) -> list[dict]:
+    """Upper envelope of credible per-activity HR-duration observations."""
+    grouped = _duration_values_by_activity(rows)
+    points = []
+    for duration in sorted(grouped):
+        observations = grouped[duration]
+        bpm, row = max(observations, key=lambda item: item[0])
+        points.append({
+            "duration_minutes": duration,
+            "bpm": round(bpm, 1),
+            "qualifying_activities": len(observations),
+            "activity_date": row.get("activity_date"),
+            "activity_name": row.get("activity_name") or row.get("filename"),
+            "filename": row.get("filename"),
+        })
+    return points
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    """Linear-interpolated percentile using equally weighted activity-level values."""
+    if not values:
+        return None
+    ordered = sorted(float(v) for v in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + fraction * (ordered[upper] - ordered[lower])
+
+
+def _percentile_hr_duration_curve(rows: list[dict], percentile: float = 0.95, min_activities: int = 8) -> list[dict]:
+    """Percentile of per-activity best HR values, with each activity weighted once."""
+    grouped = _duration_values_by_activity(rows)
+    points = []
+    for duration in sorted(grouped):
+        observations = grouped[duration]
+        if len(observations) < min_activities:
+            continue
+        bpm = _percentile([value for value, _ in observations], percentile)
+        if bpm is None:
+            continue
+        points.append({
+            "duration_minutes": duration,
+            "bpm": round(bpm, 1),
+            "qualifying_activities": len(observations),
+            "percentile": int(round(percentile * 100)),
+        })
+    return points
+
+
+def _hr_duration_curves(rows: list[dict], period: dict) -> dict:
+    usable = [r for r in rows if r.get("status") == "ok" and r.get("has_hr") and not r.get("hr_artefact")]
+    sports = sorted({r.get("activity_type") for r in usable if r.get("activity_type")})
+    annual = {
+        "all": _best_hr_duration_curve(usable),
+        "by_sport": {sport: _best_hr_duration_curve([r for r in usable if r.get("activity_type") == sport]) for sport in sports},
+        "p95_all": _percentile_hr_duration_curve(usable),
+        "p95_by_sport": {sport: _percentile_hr_duration_curve([r for r in usable if r.get("activity_type") == sport]) for sport in sports},
+    }
+
+    dated = [(parse_activity_datetime(r.get("activity_date")), r) for r in usable]
+    dated = [(dt, r) for dt, r in dated if dt is not None]
+    rolling = []
+    start_text, end_text = period.get("start"), period.get("end_exclusive")
+    if start_text and end_text:
+        start = datetime.fromisoformat(start_text)
+        end = datetime.fromisoformat(end_text)
+        cursor = datetime(start.year, start.month, 1)
+        if cursor < start:
+            cursor = datetime(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)
+        latest_dt = max((dt for dt, _ in dated), default=None)
+        data_end = min(end, latest_dt + timedelta(days=1)) if latest_dt is not None else start
+        while cursor < end and cursor < data_end:
+            next_month = datetime(cursor.year + (cursor.month == 12), 1 if cursor.month == 12 else cursor.month + 1, 1)
+            snapshot_end = min(next_month, end, data_end)
+            window_start = snapshot_end - timedelta(weeks=8)
+            window_rows = [r for dt, r in dated if window_start <= dt < snapshot_end]
+            if window_rows:
+                window_sports = sorted({r.get("activity_type") for r in window_rows if r.get("activity_type")})
+                rolling.append({
+                    "as_of": (snapshot_end - timedelta(days=1)).date().isoformat(),
+                    "window_start": window_start.date().isoformat(),
+                    "window_end_exclusive": snapshot_end.date().isoformat(),
+                    "all": _best_hr_duration_curve(window_rows),
+                    "by_sport": {sport: _best_hr_duration_curve([r for r in window_rows if r.get("activity_type") == sport]) for sport in window_sports},
+                    "p95_all": _percentile_hr_duration_curve(window_rows),
+                    "p95_by_sport": {sport: _percentile_hr_duration_curve([r for r in window_rows if r.get("activity_type") == sport]) for sport in window_sports},
+                })
+            cursor = next_month
+    return {
+        "durations_minutes": [1, 2, 5, 10, 20, 30, 45, 60, 90, 120, 240],
+        "annual": annual,
+        "rolling_8_week": rolling,
+        "p95_min_qualifying_activities": 8,
+        "notes": "Best is the upper envelope. P95 is the 95th percentile of per-activity best values, with each activity weighted once and shown only with at least 8 qualifying activities. Neither is an LT1/LT2 estimate. Artefact-flagged activities are excluded.",
+    }
+
 def build_training_summary(rows: list[dict], year: int | None, month: int | None, sport: str | None, volume: dict | None = None, weekly: list[dict] | None = None) -> dict:
     """Return the season summary as structured, JSON-friendly data."""
     ok = [r for r in rows if r["status"] == "ok"]
@@ -1393,6 +1517,7 @@ def build_training_summary(rows: list[dict], year: int | None, month: int | None
                 for r in credible_sorted
             ],
             "artefact_flagged_activities": sum(bool(r.get("hr_artefact")) for r in with_hr),
+            "duration_curve": _hr_duration_curves(ok, period),
         },
         "vam": {
             "comparable_activities": len(comparable),
@@ -1428,8 +1553,8 @@ def write_json_output(
     args,
 ) -> None:
     payload = {
-        "schema_version": 4,
-        "project_version": "31.7",
+        "schema_version": 6,
+        "project_version": "31.9",
         "generated_by": "training-analyser",
         "analysis_parameters": {
             "hrmax_bpm": args.hrmax,

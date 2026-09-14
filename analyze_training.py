@@ -1913,6 +1913,7 @@ class ActivityAnalysis:
     best30_hr: float | None
     best60_hr: float | None
     best90_hr: float | None
+    hr_duration_curve: dict[int, float | None]
     sustained2h: AerobicWindow | None
     sustained4h: AerobicWindow | None
     vam15: VamResult | None
@@ -2079,6 +2080,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
             best30_hr=None,
             best60_hr=None,
             best90_hr=None,
+            hr_duration_curve={},
             sustained2h=None,
             sustained4h=None,
             vam15=vam15,
@@ -2151,9 +2153,16 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         else:
             hrmax_reason = "short or submaximal high-HR observation"
 
-    best30 = best_hr_average(hrs, 30*60)
-    best60 = best_hr_average(hrs, 60*60)
-    best90 = best_hr_average(hrs, 90*60)
+    # Highest sustained average HR at standard durations. Short windows require
+    # continuous recording; 2h/4h reuse the long-window quality rules below.
+    curve_durations_min = (1, 2, 5, 10, 20, 30, 45, 60, 90)
+    hr_duration_curve = {
+        minutes: best_hr_average(hrs, minutes*60)
+        for minutes in curve_durations_min
+    }
+    best30 = hr_duration_curve[30]
+    best60 = hr_duration_curve[60]
+    best90 = hr_duration_curve[90]
 
     detection_threshold = lt2 if lt2 is not None else 0.85*hrmax
     blocks = detect_hard_blocks(hrs, detection_threshold)
@@ -2188,6 +2197,8 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         sustained2h = best_sustained_hr_window(all_samples, 2*3600, min_hr, max_hr)
     if duration >= 4*3600:
         sustained4h = best_sustained_hr_window(all_samples, 4*3600, min_hr, max_hr)
+    hr_duration_curve[120] = sustained2h.avg_hr if sustained2h is not None else None
+    hr_duration_curve[240] = sustained4h.avg_hr if sustained4h is not None else None
 
     retention = None
     comparison = None
@@ -2215,6 +2226,7 @@ def analyze_activity(path: str | Path, hrmax: int, lt2: float | None = None,
         best30_hr=best30,
         best60_hr=best60,
         best90_hr=best90,
+        hr_duration_curve=hr_duration_curve,
         sustained2h=sustained2h,
         sustained4h=sustained4h,
         vam15=vam15,

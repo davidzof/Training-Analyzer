@@ -2167,3 +2167,28 @@ Schema remains version 4; project version is 31.6.
 - Detected interval sessions now include `interval_work_avg_cadence_rpm` (duration-weighted across work blocks) and `interval_work_avg_cadences_rpm` (per detected work interval). Missing cadence remains `null` / blank rather than being inferred.
 
 Schema remains version 4; project version is 31.7.
+
+
+## v31.8 — heart-rate duration curves
+
+Adds descriptive HR-duration evidence without deriving new physiological thresholds.
+
+- Per activity, exports the highest sustained average HR observed at 1, 2, 5, 10, 20, 30, 45, 60, 90, 120 and 240 minutes when available.
+- Short windows require continuous HR recording; 2 h and 4 h reuse the existing long-duration continuity / maximum-stop rules.
+- The season summary exports an annual upper-envelope curve, plus separate curves by sport.
+- It also exports rolling 8-week upper-envelope snapshots evaluated at month ends, with the current partial month evaluated at the latest activity date.
+- Artefact-flagged activities are excluded from the summary upper envelopes because a best-observed curve is especially sensitive to false high HR. Per-activity HR analysis remains unchanged.
+- The curve is descriptive evidence only and is not used to calculate LT1 or LT2.
+- JSON schema version is 5; project version is 31.8.
+
+
+## v31.9 — 95th-percentile HR-duration curves
+
+- Keeps the existing best-observed HR-duration upper envelope.
+- Adds a 95th-percentile curve calculated from each activity's single best value at each duration, so one long hard activity cannot contribute hundreds of overlapping windows.
+- Each activity therefore has equal weight at a given duration.
+- The 95th-percentile point is exported only when at least 8 activities have a qualifying observation at that duration.
+- Both best and P95 points include `qualifying_activities` where applicable, making sparse long-duration evidence visible.
+- Artefact-flagged activities remain excluded from both summary curves.
+- These curves remain descriptive evidence and are not used to calculate LT1 or LT2.
+- JSON schema version is 6; project version is 31.9.

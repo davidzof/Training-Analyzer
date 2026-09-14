@@ -10,6 +10,8 @@ from data import (
 from charts import (
     weekly_load_chart,
     weekly_hours_chart,
+    hr_duration_curve_chart,
+    hr_duration_rolling_chart,
     intensity_load_chart,
     zone_distribution_chart,
     effort_timeline_chart,
@@ -170,16 +172,68 @@ with right:
     weekly_hours_chart(weekly_df)
 
 st.divider()
+st.subheader("Heart-rate Durability")
+st.caption(
+    "Observed upper envelope of sustained average heart rate. The duration axis is logarithmic; "
+    "the curve is descriptive evidence and is not used to calculate LT1 or LT2."
+)
+curve_data = (summary.get("heart_rate", {}) or {}).get("duration_curve", {}) or {}
+annual_curve = curve_data.get("annual", {}) or {}
+rolling_curves = curve_data.get("rolling_8_week", []) or []
+curve_period = st.selectbox(
+    "Period",
+    ["Annual best", "Rolling 8-week history"],
+    key="hr_curve_period",
+)
+
+all_curve_sports = set((annual_curve.get("by_sport", {}) or {}).keys())
+for item in rolling_curves:
+    all_curve_sports.update((item.get("by_sport", {}) or {}).keys())
+curve_sport_options = ["Combined"] + sorted(all_curve_sports)
+curve_sport = st.selectbox("Sport", curve_sport_options, key="hr_curve_sport")
+curve_statistic = st.selectbox(
+    "Statistic",
+    ["Best observed", "95th percentile"],
+    key="hr_curve_statistic",
+    help="P95 uses each activity's single best value once and requires at least 8 qualifying activities at a duration.",
+)
+use_p95 = curve_statistic == "95th percentile"
+params = training.get("analysis_parameters", {}) or {}
+
+if curve_period == "Annual best":
+    if curve_sport == "Combined":
+        curve_points = annual_curve.get("p95_all" if use_p95 else "all", []) or []
+    else:
+        curve_points = (annual_curve.get("p95_by_sport" if use_p95 else "by_sport", {}) or {}).get(curve_sport, []) or []
+    hr_duration_curve_chart(
+        curve_points,
+        hrmax=params.get("hrmax_bpm"),
+        lt1=params.get("lt1_bpm"),
+        lt2=params.get("lt2_bpm"),
+        statistic_label="95th percentile" if use_p95 else "Best observed",
+    )
+else:
+    hr_duration_rolling_chart(
+        rolling_curves,
+        sport=curve_sport,
+        use_p95=use_p95,
+        hrmax=params.get("hrmax_bpm"),
+        lt1=params.get("lt1_bpm"),
+        lt2=params.get("lt2_bpm"),
+        statistic_label="95th percentile" if use_p95 else "Best observed",
+    )
+
+st.divider()
 st.subheader("Intensity vs Load")
 st.caption(
     "Rightwards = harder minute-for-minute. Upwards = more accumulated cardiovascular stress. "
-    "Dashed reference lines mark HR Intensity 1.0 and HR Load 100."
+    "Dashed reference lines mark HR Intensity 1.0 and HR Load 100. Click a point to open that activity below."
 )
 intensity_load_chart(filtered)
 
 st.divider()
 st.subheader("Activity Explorer")
-st.caption("Select an activity to inspect what the analyser extracted from it.")
+st.caption("Select an activity, or click a point in the scatter plot above, to inspect what the analyser extracted from it.")
 
 selector_df = filtered.sort_values("date", ascending=False).copy()
 def _activity_selector_label(row):
@@ -190,7 +244,29 @@ def _activity_selector_label(row):
     return label
 
 selector_df["selector"] = selector_df.apply(_activity_selector_label, axis=1)
-selection = st.selectbox("Activity", selector_df["selector"].tolist(), index=0, label_visibility="collapsed")
+selector_options = selector_df["selector"].tolist()
+
+# A scatter-plot click is queued by the chart callback before this widget is
+# created. Translate its stable activity key into the selectbox label, then
+# let the normal Activity Explorer workflow take over.
+pending_activity_key = st.session_state.pop("pending_activity_key", None)
+if pending_activity_key:
+    clicked_rows = selector_df.loc[selector_df["activity_key"] == pending_activity_key]
+    if not clicked_rows.empty:
+        st.session_state["activity_selector"] = clicked_rows.iloc[0]["selector"]
+
+# Filters can remove an activity that was previously selected. Reset cleanly
+# rather than leaving Streamlit with a selectbox value that is no longer valid.
+if st.session_state.get("activity_selector") not in selector_options:
+    st.session_state["activity_selector"] = selector_options[0]
+
+selection = st.selectbox(
+    "Activity",
+    selector_options,
+    index=0,
+    key="activity_selector",
+    label_visibility="collapsed",
+)
 selected_row = selector_df.loc[selector_df["selector"] == selection].iloc[0]
 activity = find_activity(training, selected_row["activity_key"])
 
