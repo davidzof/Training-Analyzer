@@ -90,3 +90,7 @@ Adds a Heart-rate duration curve section for analyser schema 5 / project 31.8 ex
 - Tooltips show the number of qualifying activities at each duration.
 - Best-observed tooltips continue to show the source activity/date.
 - Durations with fewer than 8 qualifying activities are intentionally absent from the P95 curve.
+
+## v4.20 — English / French interface
+
+The dashboard UI now supports English and French via the **Language / Langue** selector in the sidebar. The analyser JSON schema remains unchanged and language-neutral from the dashboard's point of view: keys and source strings stored in the JSON are not rewritten. UI labels, headings, help text, chart axes/tooltips and dashboard-generated explanatory text are translated at presentation time.

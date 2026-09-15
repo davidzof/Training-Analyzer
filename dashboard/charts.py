@@ -2,24 +2,25 @@ from datetime import datetime
 import altair as alt
 import pandas as pd
 import streamlit as st
+from i18n import t
 
 
-def weekly_load_chart(weekly_df):
+def weekly_load_chart(weekly_df, lang="en"):
     if weekly_df.empty or "hr_load" not in weekly_df.columns:
-        st.info("No weekly HR Load data available.")
+        st.info(t("no_weekly_load", lang))
         return
     chart_df = weekly_df[["week_start", "hr_load"]].dropna().copy()
     chart = alt.Chart(chart_df).mark_bar().encode(
         x=alt.X("week_start:T", title=None, axis=alt.Axis(format="%b")),
-        y=alt.Y("hr_load:Q", title="HR Load"),
-        tooltip=[alt.Tooltip("week_start:T", title="Week", format="%d %b %Y"), alt.Tooltip("hr_load:Q", title="HR Load", format=".1f")],
+        y=alt.Y("hr_load:Q", title=t("hr_load", lang)),
+        tooltip=[alt.Tooltip("week_start:T", title=t("week", lang), format="%d %b %Y"), alt.Tooltip("hr_load:Q", title=t("hr_load", lang), format=".1f")],
     ).properties(height=320)
     st.altair_chart(chart, use_container_width=True)
 
 
-def weekly_hours_chart(weekly_df):
+def weekly_hours_chart(weekly_df, lang="en"):
     if weekly_df.empty or "moving_hours" not in weekly_df.columns:
-        st.info("No weekly volume data available.")
+        st.info(t("no_weekly_volume", lang))
         return
 
     chart_df = weekly_df[["week_start", "moving_hours"]].dropna().copy()
@@ -39,12 +40,12 @@ def weekly_hours_chart(weekly_df):
             ),
             y=alt.Y(
                 "moving_hours:Q",
-                title="Moving hours",
+                title=t("moving_hours", lang),
                 scale=alt.Scale(zero=True),
             ),
             tooltip=[
-                alt.Tooltip("week_start:T", title="Week", format="%d %b %Y"),
-                alt.Tooltip("moving_hours:Q", title="Hours", format=".1f"),
+                alt.Tooltip("week_start:T", title=t("week", lang), format="%d %b %Y"),
+                alt.Tooltip("moving_hours:Q", title=t("hours", lang), format=".1f"),
             ],
         )
         .properties(height=320)
@@ -98,10 +99,10 @@ def _on_intensity_load_select():
         st.session_state["pending_activity_key"] = activity_key
 
 
-def intensity_load_chart(activity_df):
+def intensity_load_chart(activity_df, lang="en"):
     chart_df = activity_df.dropna(subset=["hr_intensity", "hr_load"]).copy()
     if chart_df.empty:
-        st.info("No HR Intensity / HR Load data available.")
+        st.info(t("no_intensity_load", lang))
         return
 
     activity_pick = alt.selection_point(
@@ -116,20 +117,20 @@ def intensity_load_chart(activity_df):
         alt.Chart(chart_df)
         .mark_circle(size=70)
         .encode(
-            x=alt.X("hr_intensity:Q", title="HR Intensity", scale=alt.Scale(zero=True)),
-            y=alt.Y("hr_load:Q", title="HR Load", scale=alt.Scale(zero=True)),
-            color=alt.Color("sport:N", title="Sport"),
+            x=alt.X("hr_intensity:Q", title=t("hr_intensity", lang), scale=alt.Scale(zero=True)),
+            y=alt.Y("hr_load:Q", title=t("hr_load", lang), scale=alt.Scale(zero=True)),
+            color=alt.Color("sport:N", title=t("sport", lang)),
             opacity=alt.condition(activity_pick, alt.value(1.0), alt.value(0.72)),
             size=alt.condition(activity_pick, alt.value(125), alt.value(70)),
             tooltip=[
-                alt.Tooltip("date:T", title="Date", format="%d %b %Y"),
-                alt.Tooltip("name:N", title="Activity"),
-                alt.Tooltip("sport:N", title="Sport"),
-                alt.Tooltip("duration:N", title="Duration"),
-                alt.Tooltip("average_hr:Q", title="Avg HR", format=".1f"),
-                alt.Tooltip("hr_intensity:Q", title="HR Intensity", format=".3f"),
-                alt.Tooltip("hr_load:Q", title="HR Load", format=".1f"),
-                alt.Tooltip("classification:N", title="Classification"),
+                alt.Tooltip("date:T", title=t("date", lang), format="%d %b %Y"),
+                alt.Tooltip("name:N", title=t("activity", lang)),
+                alt.Tooltip("sport:N", title=t("sport", lang)),
+                alt.Tooltip("duration:N", title=t("duration", lang)),
+                alt.Tooltip("average_hr:Q", title=t("avg_hr", lang), format=".1f"),
+                alt.Tooltip("hr_intensity:Q", title=t("hr_intensity", lang), format=".3f"),
+                alt.Tooltip("hr_load:Q", title=t("hr_load", lang), format=".1f"),
+                alt.Tooltip("classification:N", title=t("classification", lang)),
             ],
         )
         .add_params(activity_pick)
@@ -148,16 +149,16 @@ def intensity_load_chart(activity_df):
     )
 
 
-def zone_distribution_chart(activity):
+def zone_distribution_chart(activity, lang="en"):
     values = [
-        ("Below LT1", activity.get("active_zone1_seconds"), "#9ad5a5"),
-        ("LT1–LT2", activity.get("active_zone2_seconds"), "#4c78a8"),
-        ("Above LT2", activity.get("active_zone3_seconds"), "#e45756"),
+        (t("below_lt1", lang), activity.get("active_zone1_seconds"), "#9ad5a5"),
+        (t("lt1_lt2", lang), activity.get("active_zone2_seconds"), "#4c78a8"),
+        (t("above_lt2", lang), activity.get("active_zone3_seconds"), "#e45756"),
     ]
 
     total_seconds = sum((seconds or 0) for _, seconds, _ in values)
     if total_seconds <= 0:
-        st.caption("No active HR-zone data.")
+        st.caption(t("no_active_zones", lang))
         return
 
     rows = []
@@ -187,14 +188,14 @@ def zone_distribution_chart(activity):
         alt.Chart(df)
         .mark_bar()
         .encode(
-            x=alt.X("start_hours:Q", title="Hours"),
+            x=alt.X("start_hours:Q", title=t("hours", lang)),
             x2="end_hours:Q",
             y=alt.Y("activity:N", title=None, axis=None),
             color=alt.Color(
                 "zone:N",
                 title=None,
                 scale=alt.Scale(
-                    domain=["Below LT1", "LT1–LT2", "Above LT2"],
+                    domain=[t("below_lt1", lang), t("lt1_lt2", lang), t("above_lt2", lang)],
                     range=["#9ad5a5", "#4c78a8", "#e45756"],
                 ),
                 legend=alt.Legend(
@@ -202,9 +203,9 @@ def zone_distribution_chart(activity):
                 ),
             ),
             tooltip=[
-                alt.Tooltip("zone:N", title="Zone"),
-                alt.Tooltip("hours:Q", title="Hours", format=".2f"),
-                alt.Tooltip("share:Q", title="Share", format=".1f"),
+                alt.Tooltip("zone:N", title=t("zone", lang)),
+                alt.Tooltip("hours:Q", title=t("hours", lang), format=".2f"),
+                alt.Tooltip("share:Q", title=t("share", lang), format=".1f"),
             ],
         )
         .properties(height=105)
@@ -339,16 +340,16 @@ def _activity_effort_segments(activity):
     return segments
 
 
-def effort_timeline_chart(activity):
+def effort_timeline_chart(activity, lang="en"):
     rows = _activity_effort_segments(activity)
 
     if not rows:
-        st.caption("No activity timing information.")
+        st.caption(t("no_timing", lang))
         return
 
     df = pd.DataFrame(rows)
-    lane_order = ["< LT1", "LT1–LT2", "> LT2"]
-    df["lane"] = df["type"].map({"Endurance": "< LT1", "Tempo": "LT1–LT2", "Hard": "> LT2"})
+    lane_order = [f"< LT1", t("lt1_lt2", lang), f"> LT2"]
+    df["lane"] = df["type"].map({"Endurance": "< LT1", "Tempo": t("lt1_lt2", lang), "Hard": "> LT2"})
 
     lane_df = pd.DataFrame({"lane": lane_order})
     background = alt.Chart(lane_df).mark_rule(opacity=0).encode(
@@ -356,7 +357,7 @@ def effort_timeline_chart(activity):
     )
 
     bars = alt.Chart(df).mark_bar(size=18).encode(
-        x=alt.X("start_min:Q", title="Minutes from start", axis=alt.Axis(titlePadding=12)),
+        x=alt.X("start_min:Q", title=t("minutes_from_start", lang), axis=alt.Axis(titlePadding=12)),
         x2="end_min:Q",
         y=alt.Y("lane:N", title=None, sort=lane_order, axis=alt.Axis(labelPadding=10)),
         color=alt.Color(
@@ -365,9 +366,9 @@ def effort_timeline_chart(activity):
             legend=None,
         ),
         tooltip=[
-            alt.Tooltip("lane:N", title="Intensity"),
-            alt.Tooltip("start_min:Q", title="Start (min)", format=".1f"),
-            alt.Tooltip("duration_min:Q", title="Duration (min)", format=".1f"),
+            alt.Tooltip("lane:N", title=t("intensity", lang)),
+            alt.Tooltip("start_min:Q", title=t("start_min", lang), format=".1f"),
+            alt.Tooltip("duration_min:Q", title=t("duration_min", lang), format=".1f"),
         ],
     )
 
@@ -375,10 +376,10 @@ def effort_timeline_chart(activity):
     st.altair_chart(chart, use_container_width=True)
 
 
-def hr_duration_curve_chart(points, hrmax=None, lt1=None, lt2=None, statistic_label="Best observed"):
+def hr_duration_curve_chart(points, hrmax=None, lt1=None, lt2=None, statistic_label="Best observed", lang="en"):
     """Plot an observed HR-duration curve on a logarithmic time axis."""
     if not points:
-        st.info("No HR-duration data available for this selection.")
+        st.info(t("no_hr_duration", lang))
         return
 
     rows = []
@@ -399,28 +400,28 @@ def hr_duration_curve_chart(points, hrmax=None, lt1=None, lt2=None, statistic_la
         })
 
     if not rows:
-        st.info("No HR-duration data available for this selection.")
+        st.info(t("no_hr_duration", lang))
         return
 
     df = pd.DataFrame(rows).sort_values("duration_minutes")
     base = alt.Chart(df).encode(
         x=alt.X(
             "duration_minutes:Q",
-            title="Duration (minutes, log scale)",
+            title=t("duration_log", lang),
             scale=alt.Scale(type="log", domain=[1, 240]),
             axis=alt.Axis(values=[1, 2, 5, 10, 20, 30, 60, 120, 240], format="g"),
         ),
-        y=alt.Y("bpm:Q", title=f"{statistic_label} sustained average HR (bpm)", scale=alt.Scale(zero=False)),
+        y=alt.Y("bpm:Q", title=t("sustained_avg_hr", lang, statistic=statistic_label), scale=alt.Scale(zero=False)),
     )
     tooltips = [
-        alt.Tooltip("duration_minutes:Q", title="Duration (min)", format="g"),
+        alt.Tooltip("duration_minutes:Q", title=t("duration_min", lang), format="g"),
         alt.Tooltip("bpm:Q", title=statistic_label, format=".1f"),
-        alt.Tooltip("qualifying_activities:Q", title="Qualifying activities", format=".0f"),
+        alt.Tooltip("qualifying_activities:Q", title=t("qualifying_activities", lang), format=".0f"),
     ]
-    if statistic_label == "Best observed":
+    if statistic_label in ("Best observed", t("best_observed", lang)):
         tooltips.extend([
-            alt.Tooltip("activity_date:N", title="Date"),
-            alt.Tooltip("activity_name:N", title="Activity"),
+            alt.Tooltip("activity_date:N", title=t("date", lang)),
+            alt.Tooltip("activity_name:N", title=t("activity", lang)),
         ])
     line = base.mark_line(point=True).encode(tooltip=tooltips)
 
@@ -436,14 +437,14 @@ def hr_duration_curve_chart(points, hrmax=None, lt1=None, lt2=None, statistic_la
         ref_df = pd.DataFrame(refs)
         rules = alt.Chart(ref_df).mark_rule(strokeDash=[5, 4]).encode(
             y="bpm:Q",
-            tooltip=[alt.Tooltip("label:N", title="Reference"), alt.Tooltip("bpm:Q", title="HR", format=".0f")],
+            tooltip=[alt.Tooltip("label:N", title=t("reference", lang)), alt.Tooltip("bpm:Q", title=t("hr", lang), format=".0f")],
         )
         layers.append(rules)
 
     st.altair_chart(alt.layer(*layers).properties(height=330), use_container_width=True)
 
 
-def hr_duration_rolling_chart(rolling_curves, sport="Combined", use_p95=False, hrmax=None, lt1=None, lt2=None, statistic_label="Best observed"):
+def hr_duration_rolling_chart(rolling_curves, sport="Combined", use_p95=False, hrmax=None, lt1=None, lt2=None, statistic_label="Best observed", lang="en"):
     """Plot all rolling 8-week HR-duration curves together.
 
     Older windows are shown as a pale-to-dark recency backdrop, while the
@@ -480,7 +481,7 @@ def hr_duration_rolling_chart(rolling_curves, sport="Combined", use_p95=False, h
             valid_sets.append((as_of, parsed))
 
     if not valid_sets:
-        st.info("No rolling HR-duration data available for this selection.")
+        st.info(t("no_rolling_hr_duration", lang))
         return
 
     n = len(valid_sets)
@@ -495,7 +496,7 @@ def hr_duration_rolling_chart(rolling_curves, sport="Combined", use_p95=False, h
         colors = [palette[round(i * (len(palette) - 1) / (n - 1))] for i in range(n)]
 
     for idx, ((as_of, parsed), color) in enumerate(zip(valid_sets, colors)):
-        label = f"8 weeks to {as_of}"
+        label = t("period_8w", lang, date=as_of)
         if idx == n - 1:
             recency_class = "Latest"
         elif idx == n - 2:
@@ -516,20 +517,20 @@ def hr_duration_rolling_chart(rolling_curves, sport="Combined", use_p95=False, h
 
     common_x = alt.X(
         "duration_minutes:Q",
-        title="Duration (minutes, log scale)",
+        title=t("duration_log", lang),
         scale=alt.Scale(type="log", domain=[1, 240]),
         axis=alt.Axis(values=[1, 2, 5, 10, 20, 30, 60, 120, 240], format="g"),
     )
     common_y = alt.Y(
         "bpm:Q",
-        title=f"{statistic_label} sustained average HR (bpm)",
+        title=t("sustained_avg_hr", lang, statistic=statistic_label),
         scale=alt.Scale(zero=False),
     )
     tooltip = [
-        alt.Tooltip("period:N", title="Period"),
-        alt.Tooltip("duration_minutes:Q", title="Duration (min)", format="g"),
+        alt.Tooltip("period:N", title=t("period", lang)),
+        alt.Tooltip("duration_minutes:Q", title=t("duration_min", lang), format="g"),
         alt.Tooltip("bpm:Q", title=statistic_label, format=".1f"),
-        alt.Tooltip("qualifying_activities:Q", title="Qualifying activities", format=".0f"),
+        alt.Tooltip("qualifying_activities:Q", title=t("qualifying_activities", lang), format=".0f"),
     ]
 
     # Older curves retain the recency gradient but do not create a long legend.
@@ -633,8 +634,8 @@ def hr_duration_rolling_chart(rolling_curves, sport="Combined", use_p95=False, h
         rules = alt.Chart(ref_df).mark_rule(strokeDash=[5, 4], opacity=0.55).encode(
             y="bpm:Q",
             tooltip=[
-                alt.Tooltip("label:N", title="Reference"),
-                alt.Tooltip("bpm:Q", title="HR", format=".0f"),
+                alt.Tooltip("label:N", title=t("reference", lang)),
+                alt.Tooltip("bpm:Q", title=t("hr", lang), format=".0f"),
             ],
         )
         layers.append(rules)
@@ -644,13 +645,6 @@ def hr_duration_rolling_chart(rolling_curves, sport="Combined", use_p95=False, h
     latest_period = latest_df["period"].iloc[0] if not latest_df.empty else "Latest"
     previous_period = previous_df["period"].iloc[0] if not previous_df.empty else None
     if previous_period:
-        st.caption(
-            f"Older periods are shown as lighter background curves. {previous_period} is dashed; "
-            f"{latest_period} is the thick solid curve with points. Hover any curve for values; "
-            "click a curve to highlight it and double-click to clear the selection."
-        )
+        st.caption(t("rolling_caption_two", lang, previous=previous_period, latest=latest_period))
     else:
-        st.caption(
-            f"{latest_period} is the current rolling 8-week curve. Hover any curve for values; "
-            "click a curve to highlight it and double-click to clear the selection."
-        )
+        st.caption(t("rolling_caption_one", lang, latest=latest_period))
