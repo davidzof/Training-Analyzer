@@ -8,6 +8,8 @@ regimes, volume, periodicity, maximum heart rate (HRmax) and ventilatory
 thresholds used to calculate training zones. This tool unlocks that information,
 and more.
 
+<img width="1366" height="610" alt="Screenshot 2026-09-14 at 15-32-09 Training Analyser" src="https://github.com/user-attachments/assets/04ca8562-023d-4b56-9b05-773763b45929" />
+
 # What it does
 
 This is a toolkit for data mining historical fitness activities in gpx,
@@ -18,6 +20,8 @@ and let this script analyze them.
 The output is desgined to be loaded into an  AI (LLM) to
 get insights and advice about training but it can also be read directly
 by  actual humans like coaches.
+
+<img width="1366" height="610" alt="Screenshot 2026-09-14 at 15-32-09 Training Analyser" src="https://github.com/user-attachments/assets/a71f8945-8389-4d03-8bf9-b34ed73bdfc3" />
 
 It offers the following features
 
@@ -34,6 +38,8 @@ It offers the following features
 - bike/gear context from Strava's `activities.csv`;
 - structured CSV or JSON output for longitudinal analysis by humans or LLMs;
 - historical comparison across many years.
+
+[Mining Strava Data (Youtube Video)](https://www.youtube.com/watch?v=Oz_-FOQQ5lg)
 
 The current versions are:
 
