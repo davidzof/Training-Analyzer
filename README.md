@@ -8,7 +8,7 @@ regimes, volume, periodicity, maximum heart rate (HRmax) and ventilatory
 thresholds used to calculate training zones. This tool unlocks that information,
 and more.
 
-<img width="1366" height="610" alt="Screenshot 2026-09-14 at 15-32-09 Training Analyser" src="https://github.com/user-attachments/assets/04ca8562-023d-4b56-9b05-773763b45929" />
+<img width="1366" height="610" alt="Screenshot 2026-09-15 at 11-51-44 Training Analyser" src="https://github.com/user-attachments/assets/2bc5a46c-ea0d-4601-b073-0064055560db" />
 
 # What it does
 
